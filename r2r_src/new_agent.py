@@ -98,7 +98,16 @@ class Seq2SeqAgent(BaseAgent):
         enc_hidden_size = args.rnn_dim//2 if args.bidir else args.rnn_dim
         self.encoder = model.EncoderLSTM(tok.vocab_size(), args.wemb, enc_hidden_size, padding_idx,
                                          args.dropout, bidirectional=args.bidir).cuda()
-        self.decoder = model.AttnDecoderLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda()
+        #self.decoder = model.AttnDecoderLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda()
+        policy_model_kwargs = {
+        'img_fc_dim': (128,),
+        'img_dropout': 0.5,
+        'img_feat_input_dim': self.feature_size + args.angle_feat_size,
+        'rnn_hidden_size': 512,
+        'rnn_dropout': 0.5,
+        'max_len': 80
+    }
+        self.decoder = model.SelfMonitoring(**policy_model_kwargs).cuda()
         self.critic = model.Critic().cuda()
         self.models = (self.encoder, self.decoder, self.critic)
 
@@ -120,6 +129,12 @@ class Seq2SeqAgent(BaseAgent):
     def _sort_batch(self, obs):
         ''' Extract instructions from a list of observations and sort by descending
             sequence length (to enable PyTorch packing). '''
+        def create_mask(batchsize, max_length, length):
+            """Given the length create a mask given a padded tensor"""
+            tensor_mask = torch.zeros(batchsize, max_length)
+            for idx, row in enumerate(tensor_mask):
+                row[:length[idx]] = 1
+            return tensor_mask.cuda()
 
         seq_tensor = np.array([ob['instr_encoding'] for ob in obs])
         seq_lengths = np.argmax(seq_tensor == padding_idx, axis=1)
@@ -133,9 +148,11 @@ class Seq2SeqAgent(BaseAgent):
         sorted_tensor = seq_tensor[perm_idx]
         mask = (sorted_tensor == padding_idx)[:,:seq_lengths[0]]    # seq_lengths[0] is the Maximum length
 
+        embeds_mask = create_mask(sorted_tensor.shape[0], seq_lengths[0], list(seq_lengths))
+
         return Variable(sorted_tensor, requires_grad=False).long().cuda(), \
                mask.bool().cuda(),  \
-               list(seq_lengths), list(perm_idx)
+               list(seq_lengths), list(perm_idx), embeds_mask
 
     def _feature_variable(self, obs):
         ''' Extract precomputed features into variable. '''
@@ -145,14 +162,18 @@ class Seq2SeqAgent(BaseAgent):
         return Variable(torch.from_numpy(features), requires_grad=False).cuda()
 
     def _candidate_variable(self, obs):
+        candidate_index = []
         candidate_leng = [len(ob['candidate']) + 1 for ob in obs]       # +1 is for the end
         candidate_feat = np.zeros((len(obs), max(candidate_leng), self.feature_size + args.angle_feat_size), dtype=np.float32)
         # Note: The candidate_feat at len(ob['candidate']) is the feature for the END
         # which is zero in my implementation
         for i, ob in enumerate(obs):
+            tmp_candidate_index = []
             for j, c in enumerate(ob['candidate']):
-                candidate_feat[i, j, :] = c['feature']                         # Image feat
-        return torch.from_numpy(candidate_feat).cuda(), candidate_leng
+                tmp_candidate_index.append(c['pointId']) # whether it should choose itself?
+                candidate_feat[i, j, :] = c['feature'] # Image feat
+            candidate_index.append(tmp_candidate_index)
+        return torch.from_numpy(candidate_feat).cuda(), candidate_leng, candidate_index
 
     def get_input_feat(self, obs):
         input_a_t = np.zeros((len(obs), args.angle_feat_size), np.float32)
@@ -161,9 +182,9 @@ class Seq2SeqAgent(BaseAgent):
         input_a_t = torch.from_numpy(input_a_t).cuda()
 
         f_t = self._feature_variable(obs)      # Image features from obs
-        candidate_feat, candidate_leng = self._candidate_variable(obs)
+        candidate_feat, candidate_leng, candidate_index = self._candidate_variable(obs)
 
-        return input_a_t, f_t, candidate_feat, candidate_leng
+        return input_a_t, f_t, candidate_feat, candidate_leng, candidate_index
 
     def _teacher_action(self, obs, ended):
         """
@@ -262,11 +283,11 @@ class Seq2SeqAgent(BaseAgent):
             obs = np.array(self.env.reset(batch))
 
         # Reorder the language input for the encoder (do not ruin the original code)
-        seq, seq_mask, seq_lengths, perm_idx = self._sort_batch(obs)
+        seq, seq_mask, seq_lengths, perm_idx, new_ctx_mask = self._sort_batch(obs)
         perm_obs = obs[perm_idx]
 
         ctx, h_t, c_t = self.encoder(seq, seq_lengths)
-        ctx_mask = seq_mask
+        ctx_mask = new_ctx_mask
 
         # Init the reward shaping
         last_dist = np.zeros(batch_size, np.float32)
@@ -284,6 +305,7 @@ class Seq2SeqAgent(BaseAgent):
 
         # Initialization the tracking state
         ended = np.array([False] * batch_size)  # Indices match permuation of the model, not env
+        pre_feat = torch.zeros(batch_size, 2176).cuda()
 
         # Init the logs
         rewards = []
@@ -296,15 +318,15 @@ class Seq2SeqAgent(BaseAgent):
         h1 = h_t
         for t in range(self.episode_len):
 
-            input_a_t, f_t, candidate_feat, candidate_leng = self.get_input_feat(perm_obs)
+            input_a_t, f_t, candidate_feat, candidate_leng, candidate_index = self.get_input_feat(perm_obs)
             if speaker is not None:       # Apply the env drop mask to the feat
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
+            
 
-            h_t, c_t, logit, h1 = self.decoder(input_a_t, f_t, candidate_feat,
-                                               h_t, h1, c_t,
-                                               ctx, ctx_mask,
-                                               already_dropfeat=(speaker is not None))
+            h_t, c_t, h1, logit = self.decoder(
+                f_t, candidate_feat, pre_feat, h_t, c_t, ctx,
+                h1, candidate_index, ctx_mask)
 
             hidden_states.append(h_t)
 
@@ -317,6 +339,7 @@ class Seq2SeqAgent(BaseAgent):
                     for c_id, c in enumerate(ob['candidate']):
                         if c['viewpointId'] in visited[ob_id]:
                             candidate_mask[ob_id][c_id] = 1
+            
             logit.masked_fill_(candidate_mask, -float('inf'))
 
             # Supervised training
@@ -384,6 +407,7 @@ class Seq2SeqAgent(BaseAgent):
 
             # Update the finished actions
             # -1 means ended or ignored (already ended)
+            pre_feat = candidate_feat[torch.LongTensor(range(batch_size)), cpu_a_t,:]
             ended[:] = np.logical_or(ended, (cpu_a_t == -1))
 
             # Early exit if all ended

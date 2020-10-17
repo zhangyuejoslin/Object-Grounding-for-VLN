@@ -355,7 +355,6 @@ class Seq2SeqAgent(BaseAgent):
             perm_obs = obs[perm_idx]                    # Perm the obs for the resu
 
             # Calculate the mask and reward
-            '''
             dist = np.zeros(batch_size, np.float32)
             reward = np.zeros(batch_size, np.float32)
             mask = np.ones(batch_size, np.float32)
@@ -382,7 +381,7 @@ class Seq2SeqAgent(BaseAgent):
             rewards.append(reward)
             masks.append(mask)
             last_dist[:] = dist
-            '''
+
             # Update the finished actions
             # -1 means ended or ignored (already ended)
             ended[:] = np.logical_or(ended, (cpu_a_t == -1))
@@ -390,7 +389,7 @@ class Seq2SeqAgent(BaseAgent):
             # Early exit if all ended
             if ended.all(): 
                 break
-        '''
+
         if train_rl:
             # Last action in A2C
             input_a_t, f_t, candidate_feat, candidate_leng = self.get_input_feat(perm_obs)
@@ -440,7 +439,7 @@ class Seq2SeqAgent(BaseAgent):
                 assert args.normalize_loss == 'none'
 
             self.loss += rl_loss
-        '''
+
         if train_ml is not None:
             self.loss += ml_loss * train_ml / batch_size
 

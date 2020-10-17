@@ -53,7 +53,7 @@ class Param:
         self.parser.add_argument('--optim', type=str, default='rms')    # rms, adam
         self.parser.add_argument('--lr', type=float, default=0.0001, help="The learning rate")
         self.parser.add_argument('--decay', dest='weight_decay', type=float, default=0.)
-        self.parser.add_argument('--dropout', type=float, default=0.5)
+        self.parser.add_argument('--dropout', type=float, default=0)
         self.parser.add_argument('--feedback', type=str, default='sample',
                             help='How to choose next position, one of ``teacher``, ``sample`` and ``argmax``')
         self.parser.add_argument('--teacher', type=str, default='final',

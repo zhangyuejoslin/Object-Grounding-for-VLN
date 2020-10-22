@@ -413,17 +413,21 @@ class Seq2SeqAgent(BaseAgent):
             # Early exit if all ended
             if ended.all(): 
                 break
-
+        
         if train_rl:
             # Last action in A2C
-            input_a_t, f_t, candidate_feat, candidate_leng = self.get_input_feat(perm_obs)
+            input_a_t, f_t, candidate_feat, candidate_leng, candidate_index = self.get_input_feat(perm_obs)
             if speaker is not None:
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
-            last_h_, _, _, _ = self.decoder(input_a_t, f_t, candidate_feat,
-                                            h_t, h1, c_t,
-                                            ctx, ctx_mask,
-                                            speaker is not None)
+            # last_h_, _, _, _ = self.decoder(input_a_t, f_t, candidate_feat,
+            #                                 h_t, h1, c_t,
+            #                                 ctx, ctx_mask,
+            #                                 speaker is not None)
+            last_h_, c_t, h1, logit = self.decoder(
+                f_t, candidate_feat, pre_feat, h_t, c_t, ctx,
+                h1, candidate_index, ctx_mask)
+
             rl_loss = 0.
 
             # NOW, A2C!!!
@@ -440,9 +444,9 @@ class Seq2SeqAgent(BaseAgent):
                 discount_reward = discount_reward * args.gamma + rewards[t]   # If it ended, the reward will be 0
                 mask_ = Variable(torch.from_numpy(masks[t]), requires_grad=False).cuda()
                 clip_reward = discount_reward.copy()
-                r_ = Variable(torch.from_numpy(clip_reward), requires_grad=False).cuda()
+                r_ = Variable(torch.from_numpy(clip_reward), requires_grad=False).cuda() 
                 v_ = self.critic(hidden_states[t])
-                a_ = (r_ - v_).detach()
+                a_ = (r_ - v_).detach() #advantage value
 
                 # r_: The higher, the better. -ln(p(action)) * (discount_reward - value)
                 rl_loss += (-policy_log_probs[t] * a_ * mask_).sum()
@@ -463,7 +467,7 @@ class Seq2SeqAgent(BaseAgent):
                 assert args.normalize_loss == 'none'
 
             self.loss += rl_loss
-
+        
         if train_ml is not None:
             self.loss += ml_loss * train_ml / batch_size
 

@@ -188,10 +188,11 @@ class AttnDecoderLSTM(nn.Module):
 
         #concat_input = attn_feat
         concat_input = torch.cat((action_embeds, attn_feat), 1) # (batch, embedding_size+feature_size)
+
         h_1, c_1 = self.lstm(concat_input, (prev_h1, c_0))
 
         h_1_drop = self.drop(h_1)
-        h_tilde, alpha = self.attention_layer(prev_h1_drop, ctx, ctx_mask)
+        h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
 
         # Adding Dropout
         h_tilde_drop = self.drop(h_tilde)
@@ -344,6 +345,7 @@ class SelfMonitoring(nn.Module):
 
         self.h0_fc = nn.Linear(rnn_hidden_size, img_fc_dim[-1], bias=fc_bias)
         self.h1_fc = nn.Linear(rnn_hidden_size, rnn_hidden_size, bias=fc_bias)
+        self.h2_fc = nn.Linear(rnn_hidden_size, rnn_hidden_size, bias=fc_bias)
 
         self.soft_attn = SoftAttention()
 
@@ -406,6 +408,8 @@ class SelfMonitoring(nn.Module):
         h_1_drop = self.dropout(h_1)
 
         # policy network
+       # new_weighted_ctx, new_ctx_attn = self.soft_attn(self.h2_fc(h_1_drop), positioned_ctx, mask=ctx_mask)
+        #h_tilde = self.logit_fc(torch.cat((new_weighted_ctx, h_1_drop), dim=1))
         h_tilde = self.logit_fc(torch.cat((weighted_ctx, h_1_drop), dim=1))
         logit = torch.bmm(proj_navigable_feat, h_tilde.unsqueeze(2)).squeeze(2)
 

@@ -3,6 +3,7 @@
 import os
 import sys
 import re
+from itertools import chain
 
 
 sys.path.append('build')
@@ -21,6 +22,32 @@ from param import args
 # padding, unknown word, end of sentence
 base_vocab = ['<PAD>', '<UNK>', '<EOS>']
 padding_idx = base_vocab.index('<PAD>')
+config = {
+    'split_file' : 'tasks/R2R/dictionaries/split_dictionary.txt',
+    'motion_indicator_file' : 'tasks/R2R-pano/data/data/component_data/motion_indicator/motion_dict.txt',
+    'stop_words_file': 'tasks/R2R/dictionaries/stop_words.txt',
+    'position_file': 'tasks/R2R-pano/data/data/spatial_position_dic.txt'
+}
+def split_oder(dictionary):
+    return sorted(dictionary, key = lambda x: len(x.split()), reverse=True)
+with open(config['split_file']) as f_dict:
+    dictionary = f_dict.read().split('\n')
+    dictionary = split_oder(dictionary)
+    tmp_dict = list(filter(None,[each_phrase+"," for each_phrase in dictionary]))
+    dictionary = dictionary + tmp_dict
+    dictionary = [" "+each_phrase.strip()+" " for each_phrase in dictionary]
+
+with open(config["stop_words_file"]) as f_stop_word:
+    stopword = f_stop_word.read().split('\n')
+    stopword = split_oder(stopword)
+
+# later for motion indicator and landmarks
+
+# with open(config['motion_indicator_file']) as f_dict:
+#     motion_dict = f_dict.read().split('\n')
+#     motion_dict = [each_motion.strip() for each_motion in motion_dict]
+#     motion_dict = split_oder(motion_dict)
+
 
 def load_nav_graphs(scans):
     ''' Load connectivity graph for each scan '''
@@ -71,7 +98,7 @@ def load_datasets(splits):
         # if split in ['train', 'val_seen', 'val_unseen', 'test',
         #              'val_unseen_half1', 'val_unseen_half2', 'val_seen_half1', 'val_seen_half2']:       # Add two halves for sanity check
         if "/" not in split:
-            with open('tasks/R2R/data/R2R_%s.json' % split) as f:
+            with open('tasks/R2R/data/R2R_%s3.json' % split) as f:
                 new_data = json.load(f)
         else:
             with open(split) as f:
@@ -87,6 +114,79 @@ def load_datasets(splits):
         data += new_data
     random.setstate(old_state)      # Recover the state of the random generator
     return data
+
+
+def get_configurations(sentence):
+    def combine_process(config_list):
+        new_config_list = []
+        tmp_config_list = []
+        for id, each_config in enumerate(config_list):
+            tmp_config_list.append(each_config)
+            if each_config[0] != '' :
+                new_config_list.append(tmp_config_list)
+                tmp_config_list = []
+        if tmp_config_list:
+            if new_config_list:
+                new_config_list[-1].extend(tmp_config_list)
+            else:
+                new_config_list.append(tmp_config_list)
+            tmp_config_list = []
+
+        new_config_list = [list(chain(*each_new_config)) for each_new_config in new_config_list]
+        return new_config_list
+
+    def post_processing_sentence(sentence_list):
+        def func(sl):
+            sl = sl.strip().strip(',').strip('.')
+            for sw in stopword:
+                if sl.endswith(" %s"%sw):
+                    sl = sl[:-(len(sw)+1)]
+                elif sl.endswith("%s"%sw):
+                    sl = sl[:-len(sw)]
+                elif sl.startswith("%s "%sw) or sl.startswith(" %s"%sw):
+                    sl = sl[len(sw)+1:]
+                elif sl.startswith("%s"%sw):
+                    sl = sl[len(sw):]
+            return sl
+        sentence_list = list(map(func, sentence_list))
+        new_sentence_list = []
+        tmp_id = 100
+        for id, sent in enumerate(sentence_list):
+            if sent !='':
+                sent = sent.strip().strip(',').strip('.')
+                if sent.endswith('until you') or sent.endswith ('once you') or sent.endswith ('when you'):
+                    tmp_sent = sent + " " + sentence_list[id+1]
+                    tmp_id = id + 1
+                    new_sentence_list.append(tmp_sent)
+                else:
+                    if id == tmp_id:
+                        continue
+                    else:
+                        new_sentence_list.append(sent.strip())   
+        return new_sentence_list
+    
+    sentence = sentence.lower().strip()
+    sentence_list = sentence.split('.')
+    sentence_list = [('', " "+each_sentence+" ") for each_sentence in sentence_list]
+    for each_word in dictionary:
+        for sl in list(sentence_list):
+            if each_word in sl[1]:
+                index = sentence_list.index(sl)
+                sentence_list.remove(sl)
+                tmp_word = sl[1].split(each_word)
+                for id, tt in enumerate(tmp_word):
+                    if id == 0:
+                        tmp_tuple = (sl[0], " "+ tt + " ")
+                    else:
+                        tmp_tuple = (each_word, " "+ tt + " ")
+                    sentence_list.insert(index, tmp_tuple)
+                    index += 1
+  
+    sentence_list = combine_process(sentence_list)
+    sentence_list = [' '.join(filter(None, map(str.strip, each_sentence))) for each_sentence in sentence_list]
+    sentence_list = post_processing_sentence(list(filter(None,sentence_list)))
+
+    return sentence_list
 
 
 class Tokenizer(object):

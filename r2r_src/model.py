@@ -421,3 +421,6 @@ class SelfMonitoring(nn.Module):
         #value = self.critic(torch.cat((ctx_attn, h_1_value), dim=1))
 
         return h_1, c_1, weighted_ctx, logit
+
+
+

@@ -14,7 +14,7 @@ import random
 import networkx as nx
 from param import args
 
-from utils import load_datasets, load_nav_graphs, Tokenizer
+from utils import load_datasets, load_nav_graphs, Tokenizer, get_configurations
 
 csv.field_size_limit(sys.maxsize)
 
@@ -109,12 +109,29 @@ class R2RBatch():
                         continue
                     new_item = dict(item)
                     new_item['instr_id'] = '%s_%d' % (item['path_id'], j)
-                    new_item['instructions'] = instr
-                    if tokenizer:
-                        new_item['instr_encoding'] = tokenizer.encode_sentence(instr)
-                    if not tokenizer or new_item['instr_encoding'] is not None:  # Filter the wrong data
-                        self.data.append(new_item)
-                        scans.append(item['scan'])
+                    
+                    if args.configuration:
+                        each_configuration_list = get_configurations(instr)
+                        new_item['configurations'] = each_configuration_list
+                        configuration_length = len(each_configuration_list)
+                        tmp_str = " Quan ".join(each_configuration_list) + " Quan"
+                        new_item['instructions'] = tmp_str
+                        if configuration_length:
+                            scans.append(item['scan'])
+                            self.data.append((len(new_item['configurations']), new_item))    
+                        if tokenizer:
+                            if 'instr_encoding' not in item:  # we may already include 'instr_encoding' when generating synthetic instructions       
+                                new_item['instr_encoding'] = tokenizer.encode_sentence(tmp_str)
+
+                    else:
+                        new_item['instructions'] = str
+                        if tokenizer:
+                            new_item['instr_encoding'] = tokenizer.encode_sentence(instr)
+                        if not tokenizer or new_item['instr_encoding'] is not None:  # Filter the wrong data
+                            self.data.append(new_item)
+                            scans.append(item['scan'])
+                    
+
         if name is None:
             self.name = splits[0] if len(splits) > 0 else "FAKE"
         else:
@@ -122,9 +139,14 @@ class R2RBatch():
 
         self.scans = set(scans)
         self.splits = splits
-        self.seed = seed
-        random.seed(self.seed)
-        random.shuffle(self.data)
+        
+        if args.configuration:
+            self.data.sort(key=lambda x: x[0])
+            self.data = list(map(lambda item:item[1], self.data))
+        else:
+            self.seed = seed
+            random.seed(self.seed)
+            random.shuffle(self.data)
 
         self.ix = 0
         self.batch_size = batch_size
@@ -291,6 +313,7 @@ class R2RBatch():
                 'feature' : feature,
                 'candidate': candidate,
                 'navigableLocations' : state.navigableLocations,
+                'configurations': item['configurations'],
                 'instructions' : item['instructions'],
                 'teacher' : self._shortest_path_action(state, item['path'][-1]),
                 'path_id' : item['path_id']

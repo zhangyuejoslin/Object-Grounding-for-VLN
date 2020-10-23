@@ -16,7 +16,7 @@ class Param:
         self.parser.add_argument('--maxInput', type=int, default=80, help="max input instruction")
         self.parser.add_argument('--maxDecode', type=int, default=120, help="max input instruction")
         self.parser.add_argument('--maxAction', type=int, default=20, help='Max Action sequence')
-        self.parser.add_argument('--batchSize', type=int, default=64)
+        self.parser.add_argument('--batchSize', type=int, default=4)
         self.parser.add_argument('--ignoreid', type=int, default=-100)
         self.parser.add_argument('--feature_size', type=int, default=2048)
         self.parser.add_argument("--loadOptim",action="store_const", default=False, const=True)
@@ -80,6 +80,18 @@ class Param:
         # A2C
         self.parser.add_argument("--gamma", default=0.9, type=float)
         self.parser.add_argument("--normalize", dest="normalize_loss", default="total", type=str, help='batch or total')
+
+        #Spatial Configuration
+        self.parser.add_argument("--configuration", default=True, type=float)
+
+
+        # BERT Encoder
+        self.parser.add_argument("--rnn_hidden_size", default=512, type=float)
+        self.parser.add_argument("--rnn_dropout", default=0.5, type=float)
+        self.parser.add_argument("--bidirectional", default=0, type=float)
+        self.parser.add_argument("--rnn_num_layers", default=1, type=float)
+        self.parser.add_argument('--word_embedding_size', default=768, type=int,
+                    help='default embedding_size for language encoder /256')
 
         self.args = self.parser.parse_args()
 

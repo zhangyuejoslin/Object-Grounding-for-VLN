@@ -97,8 +97,6 @@ class Seq2SeqAgent(BaseAgent):
 
         # Models
         enc_hidden_size = args.rnn_dim//2 if args.bidir else args.rnn_dim
-        # self.encoder = model.EncoderLSTM(tok.vocab_size(), args.wemb, enc_hidden_size, padding_idx,
-        #                                  args.dropout, bidirectional=args.bidir).cuda()
         encoder_kwargs = {
         'vocab_size': tok.vocab_size(),
         'embedding_size': args.word_embedding_size,
@@ -109,16 +107,18 @@ class Seq2SeqAgent(BaseAgent):
         'num_layers': args.rnn_num_layers
     }
         self.encoder = encoder.EncoderBERT(**encoder_kwargs).cuda()
-        #self.decoder = model.AttnDecoderLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda()
         policy_model_kwargs = {
         'img_fc_dim': (128,),
+        'img_fc_use_batchnorm': 1,
         'img_dropout': 0.5,
         'img_feat_input_dim': self.feature_size + args.angle_feat_size,
         'rnn_hidden_size': 512,
         'rnn_dropout': 0.5,
-        'max_len': 80
+        'max_len': 80,
+        'fc_bias': True, 
+        'max_navigable': args.candidate_length + 1
     }
-        self.decoder = model.SelfMonitoring(**policy_model_kwargs).cuda()
+        self.decoder = model.ConfiguringObject(**policy_model_kwargs).cuda()
         self.critic = model.Critic().cuda()
         self.models = (self.encoder, self.decoder, self.critic)
 
@@ -135,6 +135,9 @@ class Seq2SeqAgent(BaseAgent):
         # Logs
         sys.stdout.flush()
         self.logs = defaultdict(list)
+
+        #features
+        self.obj_feat = self._obj_feature(args.obj_img_feat_path)
 
 
     def _sort_batch(self, obs):
@@ -172,30 +175,118 @@ class Seq2SeqAgent(BaseAgent):
             features[i, :, :] = ob['feature']   # Image feat
         return Variable(torch.from_numpy(features), requires_grad=False).cuda()
 
+    # object feature
+    def _obj_feature(self, object_img_feat_path):
+        all_obj = np.load(object_img_feat_path, allow_pickle=True).item()
+        for scan_key, scan_value in  all_obj.items():
+            for state_key, state_value in scan_value.items():
+                for heading_elevation_key, heading_elevation_value in state_value.items():
+                    heading_elevation_value['text_feature'] = torch.from_numpy(heading_elevation_value['text_feature'])
+                    heading_elevation_value['text_mask'] = torch.from_numpy(heading_elevation_value['text_mask'])
+                    heading_elevation_value['features'] = torch.from_numpy(heading_elevation_value['features']) 
+        return all_obj
+
+
     def _candidate_variable(self, obs):
+        object_num = 36
+        feature_size1 = 300
+        feature_size2 = 152
         candidate_index = []
-        candidate_leng = [len(ob['candidate']) + 1 for ob in obs]       # +1 is for the end
-        candidate_feat = np.zeros((len(obs), max(candidate_leng), self.feature_size + args.angle_feat_size), dtype=np.float32)
+        batch_size = len(obs)
+
+        #candidate_leng = args.candidate_length + 1 # +1 is for the end
+        candidate_len_list = [len(ob['candidate']) + 1 for ob in obs] #maybe change later
+        candidate_leng = max(candidate_len_list)
+
+        candidate_img_feat = np.zeros((batch_size, candidate_leng*3, self.feature_size + args.angle_feat_size), dtype=np.float32)
+        pano_img_feat = torch.zeros(batch_size, 36, self.feature_size + args.angle_feat_size)
+
+        navigable_obj_text_feat = torch.zeros(batch_size, candidate_leng*3, object_num, feature_size1)
+        object_mask = torch.zeros(batch_size, candidate_leng*3, object_num)
+        navigable_obj_img_feat = torch.zeros(batch_size, candidate_leng*3, object_num, feature_size2)
+
         # Note: The candidate_feat at len(ob['candidate']) is the feature for the END
         # which is zero in my implementation
         for i, ob in enumerate(obs):
+            pano_img_feat[i,:] = torch.from_numpy(ob['feature'])
             tmp_candidate_index = []
+            bottom_index_list = []
+            middle_index_list = []
+            top_index_list = []
+            heading_list = []
+
             for j, c in enumerate(ob['candidate']):
-                tmp_candidate_index.append(c['pointId']) # whether it should choose itself?
-                candidate_feat[i, j, :] = c['feature'] # Image feat
+                tmp_candidate_index.append(c['pointId']) # did not include itself
+                bottom_index, middle_index, top_index = self.elevation_index(c['pointId'])
+                bottom_index_list.append(bottom_index)
+                middle_index_list.append(middle_index)
+                top_index_list.append(top_index)
+                heading_list.append(c['heading'])
+            
+            interval_len = len(bottom_index_list)
             candidate_index.append(tmp_candidate_index)
-        return torch.from_numpy(candidate_feat).cuda(), candidate_leng, candidate_index
+        
+            #image feature
+            candidate_img_feat[i, 0:interval_len,:] = pano_img_feat[i,bottom_index_list]
+            candidate_img_feat[i, candidate_leng:candidate_leng+interval_len,:] = pano_img_feat[i,middle_index_list]    
+            candidate_img_feat[i, 2*candidate_leng:2*candidate_leng+interval_len,:] = pano_img_feat[i,top_index_list]
+
+            #object feature
+            tmp_obj_text_feat, tmp_mask, tmp_obj_img_feat = self._faster_rcnn_feature(ob, heading_list)
+            self.distribute_feature(interval_len, navigable_obj_text_feat[i], tmp_obj_text_feat, candidate_leng)
+            self.distribute_feature(interval_len, object_mask[i], tmp_mask, candidate_leng)
+            self.distribute_feature(interval_len, navigable_obj_img_feat[i], tmp_obj_img_feat, candidate_leng)
+
+        # candidate_leng condtain itself, but candidate_index does not contain itself    
+        return torch.from_numpy(candidate_img_feat), navigable_obj_text_feat, object_mask, navigable_obj_img_feat, candidate_len_list, candidate_index
+    
+    def elevation_index(self, index):
+        elevation_level = index % 12
+        bottom_index = elevation_level
+        middle_index = elevation_level + 12
+        top_index = elevation_level + 12 + 12
+        return bottom_index, middle_index, top_index
+    
+    def distribute_feature(self, interval_len, pre_feature, feature, candidate_leng):
+        pre_feature[0: interval_len] =  feature[0*interval_len:1*interval_len]
+        pre_feature[candidate_leng:candidate_leng+interval_len] =  feature[1*interval_len:2*interval_len]
+        pre_feature[2*candidate_leng:2*candidate_leng+interval_len] =  feature[2*interval_len:3*interval_len]
+    
+    def _faster_rcnn_feature(self, ob, heading_list):
+        obj_img_feature = []
+        obj_text_feature = []
+        obj_mask = []
+        object_text = []
+        elevation_list = [30*math.pi/180, 0*math.pi/180, -30*math.pi/180]
+
+        for elevation in elevation_list:
+            for heading in heading_list:
+                temp = int(round((heading*180/math.pi)/30) * 30)
+                if temp >=  360:
+                    temp = temp - 360      
+                elif temp < 0 :
+                    temp = temp + 360
+                obj_text_feature.append(self.obj_feat[ob['scan']][ob['viewpoint']][str(temp*math.pi/180)+'_'+ str(elevation)]['text_feature'])
+                obj_mask.append(self.obj_feat[ob['scan']][ob['viewpoint']][str(temp*math.pi/180)+'_'+ str(elevation)]['text_mask'])
+                obj_img_feature.append(self.obj_feat[ob['scan']][ob['viewpoint']][str(temp*math.pi/180)+'_'+ str(elevation)]['features'])
+
+        obj_text_feature = torch.stack(obj_text_feature, dim=0)
+        obj_mask = torch.stack(obj_mask, dim=0)
+        obj_img_feature = torch.stack(obj_img_feature, dim=0)
+        return obj_text_feature, obj_mask, obj_img_feature
 
     def get_input_feat(self, obs):
         input_a_t = np.zeros((len(obs), args.angle_feat_size), np.float32)
         for i, ob in enumerate(obs):
             input_a_t[i] = utils.angle_feature(ob['heading'], ob['elevation'])
+            
         input_a_t = torch.from_numpy(input_a_t).cuda()
 
         f_t = self._feature_variable(obs)      # Image features from obs
-        candidate_feat, candidate_leng, candidate_index = self._candidate_variable(obs)
+        #candidate_feat, candidate_leng, candidate_index = self._candidate_variable(obs)
+        candidate_feat, candidate_obj_text_feat, object_mask, candidate_obj_img_feat, candidate_leng, candidate_index = self._candidate_variable(obs)
 
-        return input_a_t, f_t, candidate_feat, candidate_leng, candidate_index
+        return input_a_t, f_t, candidate_feat, candidate_obj_text_feat, object_mask, candidate_obj_img_feat, candidate_leng, candidate_index
 
     def _teacher_action(self, obs, ended):
         """
@@ -294,18 +385,17 @@ class Seq2SeqAgent(BaseAgent):
         
         
         # get configurations
-        instr_id_list = [0] * batch_size
-        config_num_list = [0] * batch_size
-        sentence = [""] * batch_size
+        instr_id_list = []
+        config_num_list = []
+        sentence = []
         
-        seq, seq_mask, seq_lengths, perm_idx, ctx_mask = self._sort_batch(obs)
+        _, _, _, perm_idx, _ = self._sort_batch(obs)
+        perm_obs = obs[perm_idx]
 
-        for ob_id in range(batch_size):
-            tmp_ob_id = perm_idx[ob_id]
-            tmp_ob = obs[tmp_ob_id]
-            instr_id_list[ob_id] = tmp_ob['instr_id']
-            config_num_list[ob_id] = len(tmp_ob['configurations'])
-            sentence[ob_id] = tmp_ob['instructions']
+        for each_ob in perm_obs:
+            instr_id_list.append(each_ob['instr_id']) 
+            config_num_list.append(len(each_ob['configurations']))
+            sentence.append(each_ob['instructions'])
 
         '''
         for ob_id, ob in enumerate(:
@@ -324,21 +414,41 @@ class Seq2SeqAgent(BaseAgent):
                 #landmark_object_feature[ob_id, config_id, 0:len(tmp_landmark_tuple),:] = tmp_landmark_tensor
         '''
             
+        # getting BERT representation
+        tmp_ctx, h_t, c_t, tmp_ctx_mask, split_index = self.encoder(sentence)
 
-        tmp_ctx, h_t, c_t, tmp_ctx_mask, split_index = self.encoder(sentence, seq_lengths)
+        token_num = max([each_split[-1] for each_split in split_index])
+        config_num = max([len(each_split) for each_split in split_index])
+
+        bert_ctx = torch.zeros(batch_size, config_num, token_num, 512, device = tmp_ctx.device)
+        bert_ctx_mask = torch.zeros(batch_size, config_num, token_num, device = tmp_ctx.device)
+        bert_cls = torch.zeros(batch_size, config_num, 512, device = tmp_ctx.device)
+        bert_cls_mask = torch.zeros(batch_size, config_num, device = tmp_ctx.device)
+
+        for ob_id, each_index_list in enumerate(split_index):
+            start = 0
+            for list_id, each_index in enumerate(each_index_list):
+                end = each_index
+                bert_ctx[ob_id,list_id,0:end-start,:] = tmp_ctx[ob_id,start:end,:]
+                bert_ctx_mask[ob_id, list_id,0:end-start] = tmp_ctx_mask[ob_id,start:end]
+                bert_cls[ob_id, list_id, :] = tmp_ctx[ob_id, each_index,:]
+                bert_cls_mask[ob_id, list_id] = 1
+                start = end + 1
+        
+        attend_ctx, attn = self.encoder.sf(bert_cls, bert_cls_mask, bert_ctx, bert_ctx_mask)
+
+        ctx = attend_ctx
+        ctx_mask = bert_cls_mask 
+
+        #state attention initialization
+        s0 = torch.zeros(batch_size,config_num, requires_grad=False).cuda()
+        r0 = torch.zeros(batch_size,2, requires_grad=False).cuda()
+        s0[:,0] = 1
+        r0[:,0] = 1
+        ctx_attn = s0
 
         ##############
-
-
-
-        # Reorder the language input for the encoder (do not ruin the original code)
-       
-        perm_obs = obs[perm_idx]
-
-        #ctx, h_t, c_t = self.encoder(seq, seq_lengths)
-        ctx_mask = new_ctx_mask
-
-        # Init the reward shaping
+         # Init the reward shaping
         last_dist = np.zeros(batch_size, np.float32)
         for i, ob in enumerate(perm_obs):   # The init distance from the view point to the target
             last_dist[i] = ob['distance']
@@ -367,15 +477,21 @@ class Seq2SeqAgent(BaseAgent):
         h1 = h_t
         for t in range(self.episode_len):
 
-            input_a_t, f_t, candidate_feat, candidate_leng, candidate_index = self.get_input_feat(perm_obs)
+            input_a_t, f_t, candidate_feat, candidate_obj_text_feat, object_mask, candidate_obj_img_feat, candidate_leng, candidate_index = self.get_input_feat(perm_obs)
+
+            candidate_feat = candidate_feat.cuda()
+            candidate_obj_text_feat = candidate_obj_text_feat.cuda()
+            object_mask = object_mask.cuda()
+            candidate_obj_img_feat = candidate_obj_img_feat.cuda()
+
             if speaker is not None:       # Apply the env drop mask to the feat
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
             
+            r_t = r0 if t==0 else None
 
-            h_t, c_t, h1, logit = self.decoder(
-                f_t, candidate_feat, pre_feat, h_t, c_t, ctx,
-                h1, candidate_index, ctx_mask)
+            h_t, c_t, ctx_attn, logit = self.decoder(candidate_feat, candidate_obj_text_feat, candidate_obj_img_feat, object_mask, pre_feat,  \
+            h_t, c_t, ctx, ctx_attn, r_t, candidate_index, ctx_mask, t)
 
             hidden_states.append(h_t)
 
@@ -465,7 +581,14 @@ class Seq2SeqAgent(BaseAgent):
         
         if train_rl:
             # Last action in A2C
-            input_a_t, f_t, candidate_feat, candidate_leng, candidate_index = self.get_input_feat(perm_obs)
+            input_a_t, f_t, candidate_feat, candidate_obj_text_feat, object_mask, candidate_obj_img_feat, candidate_leng, candidate_index = self.get_input_feat(perm_obs)
+
+
+            candidate_feat = candidate_feat.cuda()
+            candidate_obj_text_feat = candidate_obj_text_feat.cuda()
+            object_mask = object_mask.cuda()
+            candidate_obj_img_feat = candidate_obj_img_feat.cuda()
+
             if speaker is not None:
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
@@ -473,9 +596,8 @@ class Seq2SeqAgent(BaseAgent):
             #                                 h_t, h1, c_t,
             #                                 ctx, ctx_mask,
             #                                 speaker is not None)
-            last_h_, c_t, h1, logit = self.decoder(
-                f_t, candidate_feat, pre_feat, h_t, c_t, ctx,
-                h1, candidate_index, ctx_mask)
+            last_h_, _, _, _ = self.decoder(candidate_feat, candidate_obj_text_feat, candidate_obj_img_feat, object_mask, pre_feat,  \
+            h_t, c_t, ctx, ctx_attn, r_t, candidate_index, ctx_mask, t)
 
             rl_loss = 0.
 
@@ -526,6 +648,7 @@ class Seq2SeqAgent(BaseAgent):
             self.losses.append(self.loss.item() / self.episode_len)    # This argument is useless.
 
         return traj
+
 
     def c(self):
         """

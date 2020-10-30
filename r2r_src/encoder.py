@@ -121,7 +121,7 @@ class EncoderBERT(nn.Module):
         return x[tuple(indices)]
     
     def bert_sentence_embedding(self, inputs):
-        tokenized_dict = self.bert_tokenizer.batch_encode_plus(inputs, add_special_tokens=True, return_attention_mask=True, return_tensors='pt', pad_to_max_length=True, max_length=240)
+        tokenized_dict = self.bert_tokenizer.batch_encode_plus(inputs, add_special_tokens=True, return_attention_mask=True, return_tensors='pt', pad_to_max_length=True, max_length=80)
         split_index_list = []
         for each_token_id in tokenized_dict['input_ids']:
             tmp_split_index = list(np.where(each_token_id.numpy()==24110)[0])
@@ -141,8 +141,7 @@ class EncoderBERT(nn.Module):
         """
         a0 = Variable(torch.zeros( 
             batch_size, 
-            #max_config_num, 
-            15,
+            max_config_num, 
             device=self.bert_model.device
             ), requires_grad=False)
         # a0[:,:2] = config_mask[:,:2]/config_mask[:,:2].sum(dim=1, keepdim=True)
@@ -158,29 +157,17 @@ class EncoderBERT(nn.Module):
             device=self.bert_model.device
             ), requires_grad=False)
         r0[:,0] = 1
-        h0 = Variable(torch.zeros(
-            batch_size,
-            self.hidden_size,
-            device=self.bert_model.device
-        ), requires_grad=False)
-        c0 = Variable(torch.zeros(
-            batch_size,
-            self.hidden_size,
-            device=self.bert_model.device
-        ), requires_grad=False)
-        return a0, r0, h0, c0
+        
+        return a0, r0
 
-    def forward(self, inputs, lengths):
+    def forward(self, inputs):
         """
         Expects input vocab indices as (batch, seq_len). Also requires a list of lengths for dynamic batching.
         """
         
   
-        embeds, tmp_mask, split_index_list = self.bert_sentence_embedding(inputs)
-     
+        embeds, embeds_mask, split_index_list = self.bert_sentence_embedding(inputs)
         embeds = self.drop(embeds)
-
-        embeds_mask = self.create_mask(embeds.size(0), embeds.size(1), lengths)
        
         if self.bidirectional:
             output_1, (ht_1, ct_1) = self.rnn(embeds, mask=embeds_mask)
@@ -201,7 +188,6 @@ class SoftAttention(nn.Module):
     def __init__(self, dimension):
         super(SoftAttention, self).__init__()
         self.softmax = nn.Softmax(dim=2)
-        #self.conf_linear = nn.Linear(768, 768)
         self.conf_linear = nn.Linear(512, 512)
 
     def forward(self, cls_input, cls_mask, token_input, token_mask):

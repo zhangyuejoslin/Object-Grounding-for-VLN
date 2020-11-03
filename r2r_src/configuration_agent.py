@@ -107,18 +107,19 @@ class Seq2SeqAgent(BaseAgent):
         'num_layers': args.rnn_num_layers
     }
         self.encoder = encoder.EncoderBERT(**encoder_kwargs).cuda()
-        policy_model_kwargs = {
-        'img_fc_dim': (128,),
-        'img_fc_use_batchnorm': 1,
-        'img_dropout': 0.5,
-        'img_feat_input_dim': self.feature_size + args.angle_feat_size,
-        'rnn_hidden_size': 512,
-        'rnn_dropout': 0.5,
-        'max_len': 80,
-        'fc_bias': True, 
-        'max_navigable': args.candidate_length + 1
-    }
-        self.decoder = model.ConfiguringObject(**policy_model_kwargs).cuda()
+    #     policy_model_kwargs = {
+    #     'img_fc_dim': (128,),
+    #     'img_fc_use_batchnorm': 1,
+    #     'img_dropout': 0.5,
+    #     'img_feat_input_dim': self.feature_size + args.angle_feat_size,
+    #     'rnn_hidden_size': 512,
+    #     'rnn_dropout': 0.5,
+    #     'max_len': 80,
+    #     'fc_bias': True, 
+    #     'max_navigable': args.candidate_length + 1
+    # }
+    #     self.decoder = model.ConfiguringObject(**policy_model_kwargs).cuda()
+        
         self.critic = model.Critic().cuda()
         self.models = (self.encoder, self.decoder, self.critic)
 
@@ -138,6 +139,9 @@ class Seq2SeqAgent(BaseAgent):
 
         #features
         self.obj_feat = self._obj_feature(args.obj_img_feat_path)
+        self.landmark_feature = self.get_landmark_feature(args.train_landmark_path, args.val_seen_landmark_path, args.val_unseen_landmark_path)
+        self.motion_indicator_feature = self.get_motion_indicator_feature(args.train_motion_indi_path, args.val_seen_motion_indi_path, args.val_unseen_motion_indi_path)
+        
 
 
     def _sort_batch(self, obs):
@@ -185,6 +189,30 @@ class Seq2SeqAgent(BaseAgent):
                     heading_elevation_value['text_mask'] = torch.from_numpy(heading_elevation_value['text_mask'])
                     heading_elevation_value['features'] = torch.from_numpy(heading_elevation_value['features']) 
         return all_obj
+    
+    def get_landmark_feature(self, train_landmark_dir, val_seen_landmark_dir, val_unseen_landmark_dir):
+        landmark_dict = {}
+        landmark_dict1 = np.load(train_landmark_dir, allow_pickle=True).item()
+        landmark_dict2 = np.load(val_seen_landmark_dir, allow_pickle=True).item()
+        landmark_dict3 = np.load(val_unseen_landmark_dir, allow_pickle=True).item()
+        #landmark_dict4 = np.load('tasks/R2R-pano/landmark_test.npy', allow_pickle=True).item()
+        landmark_dict.update(landmark_dict1)
+        landmark_dict.update(landmark_dict2)
+        landmark_dict.update(landmark_dict3)
+        #landmark_dict.update(landmark_dict4)
+        return landmark_dict
+    
+    def get_motion_indicator_feature(self, train_motion_indi_dir,val_seen_motion_indi_dir,val_unseen_motion_indi_dir):
+        motion_indicator_dict = {}
+        motion_indicator_dict1 = np.load(train_motion_indi_dir, allow_pickle=True).item()
+        motion_indicator_dict2 = np.load(val_seen_motion_indi_dir, allow_pickle=True).item()
+        motion_indicator_dict3 = np.load(val_unseen_motion_indi_dir, allow_pickle=True).item()
+
+        motion_indicator_dict.update(motion_indicator_dict1)
+        motion_indicator_dict.update(motion_indicator_dict2)
+        motion_indicator_dict.update(motion_indicator_dict3)
+        #landmark_dict.update(landmark_dict4)
+        return motion_indicator_dict
 
 
     def _candidate_variable(self, obs):
@@ -392,38 +420,53 @@ class Seq2SeqAgent(BaseAgent):
         _, _, _, perm_idx, _ = self._sort_batch(obs)
         perm_obs = obs[perm_idx]
 
-        for each_ob in perm_obs:
+        #getting landmark and motion_indicator
+        landmark_obj_feat_list = [] 
+        motion_feat_list = []
+        config_num_list = []
+        landmark_num_list = []
+
+        for ob_id, each_ob in enumerate(perm_obs):
             instr_id_list.append(each_ob['instr_id']) 
             config_num_list.append(len(each_ob['configurations']))
             sentence.append(each_ob['instructions'])
+            tmp_landmark_num_list = []
+            tmp_landmark_obj_feat = []
+            tmp_motion_indi_feat = []
+            for config_id, each_config in enumerate(each_ob['configurations']):
+                tmp_landmark_tuple = self.landmark_feature[each_ob['instr_id']+"_"+str(config_id)]
+                tmp_motion_indi_tensor = self.motion_indicator_feature[each_ob["instr_id"]+"_"+str(config_id)]
+                tmp_landmark_num_list.append(len(tmp_landmark_tuple))
+                tmp_landmark_obj_feat.append(tmp_landmark_tuple)
+                tmp_motion_indi_feat.append(tmp_motion_indi_tensor)
+            landmark_num_list.append(max(tmp_landmark_num_list))
+            landmark_obj_feat_list.append(tmp_landmark_obj_feat)
+            motion_feat_list.append(tmp_motion_indi_feat)
 
-        '''
-        for ob_id, ob in enumerate(:
-            tmp_ob_id = perm_idx[ob_id]
-            instr_id_list[tmp_ob_id] = ob['instr_id']
-            config_num_list[tmp_ob_id] = len(ob['configurations'])
-            
-            tmp_landmark_list = []
-            tmp_motion_indicator_list = []
-            for config_id, each_config in enumerate(ob['configurations']):
-                #tmp_landmark_tuple = self.landmark_feature[ob["instr_id"]+"_"+str(config_id)]
-                #tmp_landmark_tensor = torch.tensor(np.stack(list(zip(*tmp_landmark_tuple))[1], axis=0), dtype=torch.float).to(self.device)
-                tmp_motion_indicator = self.motion_indicator_feature[ob["instr_id"]+"_"+str(config_id)]
-                input_landmark_tensor[ob_id, config_id,:] = tmp_landmark_tensor[0,:]
-                motion_indicator_tensor[ob_id, config_id,:] = torch.tensor(tmp_motion_indicator,dtype=torch.float).to(self.device)
-                #landmark_object_feature[ob_id, config_id, 0:len(tmp_landmark_tuple),:] = tmp_landmark_tensor
-        '''
+        max_config_num = max(config_num_list)
+        max_landmark_num = max(landmark_num_list)
+        landmark_object_feature = torch.zeros(batch_size, max_config_num, max_landmark_num, args.text_dimension).cuda()
+        motion_indicator_tensor = torch.zeros(batch_size, max_config_num, args.text_dimension).cuda()
+
+        for ob_id, each_ob in enumerate(perm_obs):
+            for config_id, each_config in enumerate(each_ob['configurations']):
+                tmp_landmark_tuple = landmark_obj_feat_list[ob_id][config_id]
+                tmp_landmark_tensor = torch.tensor(np.stack(list(zip(*tmp_landmark_tuple))[1], axis=0), dtype=torch.float)
+                landmark_object_feature[ob_id, config_id, 0:len(tmp_landmark_tuple),:] = tmp_landmark_tensor
+                motion_indicator_tensor[ob_id, config_id,:] = torch.tensor(motion_feat_list[ob_id][config_id],dtype=torch.float)
             
         # getting BERT representation
         tmp_ctx, h_t, c_t, tmp_ctx_mask, split_index = self.encoder(sentence)
 
         token_num = max([each_split[-1] for each_split in split_index])
-        config_num = max([len(each_split) for each_split in split_index])
+      
+        #assert max_config_num == max([len(each_split) for each_split in split_index]) 
+        # There are cases that are statisfied with this assertion statement when the length of the sentence larger than 80. So here we just heuritically set all equals max_config_num
 
-        bert_ctx = torch.zeros(batch_size, config_num, token_num, 512, device = tmp_ctx.device)
-        bert_ctx_mask = torch.zeros(batch_size, config_num, token_num, device = tmp_ctx.device)
-        bert_cls = torch.zeros(batch_size, config_num, 512, device = tmp_ctx.device)
-        bert_cls_mask = torch.zeros(batch_size, config_num, device = tmp_ctx.device)
+        bert_ctx = torch.zeros(batch_size, max_config_num, token_num, 512, device = tmp_ctx.device)
+        bert_ctx_mask = torch.zeros(batch_size, max_config_num, token_num, device = tmp_ctx.device)
+        bert_cls = torch.zeros(batch_size, max_config_num, 512, device = tmp_ctx.device)
+        bert_cls_mask = torch.zeros(batch_size, max_config_num, device = tmp_ctx.device)
 
         for ob_id, each_index_list in enumerate(split_index):
             start = 0
@@ -437,11 +480,12 @@ class Seq2SeqAgent(BaseAgent):
         
         attend_ctx, attn = self.encoder.sf(bert_cls, bert_cls_mask, bert_ctx, bert_ctx_mask)
 
-        ctx = attend_ctx
+        ctx = torch.cat([attend_ctx, landmark_object_feature[:,:,0], motion_indicator_tensor], dim=2)   
+        #ctx = attend_ctx
         ctx_mask = bert_cls_mask 
 
         #state attention initialization
-        s0 = torch.zeros(batch_size,config_num, requires_grad=False).cuda()
+        s0 = torch.zeros(batch_size, max_config_num, requires_grad=False).cuda()
         r0 = torch.zeros(batch_size,2, requires_grad=False).cuda()
         s0[:,0] = 1
         r0[:,0] = 1
@@ -490,8 +534,17 @@ class Seq2SeqAgent(BaseAgent):
             
             r_t = r0 if t==0 else None
 
+            ### landmark_similarity
+            image_num, object_num = candidate_obj_img_feat.shape[1],candidate_obj_img_feat.shape[2]
+            landmark_object_feature = landmark_object_feature.view(batch_size, max_config_num*max_landmark_num, 300) #batch * 180 * 300
+            landmark_similarity = torch.matmul(candidate_obj_text_feat, torch.transpose(landmark_object_feature.unsqueeze(1),3,2))# (4*48*36*300) * (4*1*300*180）-> 4 * 48 * 36*180
+            landmark_similarity = landmark_similarity.view(batch_size, image_num, object_num, max_config_num, max_landmark_num) # 4 * 48 * 36 * 15 * 12
+            landmark_similarity = torch.max(landmark_similarity, dim=-1)[0]
+            weighted_landmark_similarity = torch.matmul(landmark_similarity, torch.transpose(ctx_attn.reshape(ctx_attn.shape[0],1,1,ctx_attn.shape[1]),3,2)).squeeze(-1)
+
+            ###
             h_t, c_t, ctx_attn, logit = self.decoder(candidate_feat, candidate_obj_text_feat, candidate_obj_img_feat, object_mask, pre_feat,  \
-            h_t, c_t, ctx, ctx_attn, r_t, candidate_index, ctx_mask, t)
+            h_t, c_t, ctx, ctx_attn, r_t, candidate_index, ctx_mask, t, weighted_landmark_similarity)
 
             hidden_states.append(h_t)
 
@@ -583,7 +636,6 @@ class Seq2SeqAgent(BaseAgent):
             # Last action in A2C
             input_a_t, f_t, candidate_feat, candidate_obj_text_feat, object_mask, candidate_obj_img_feat, candidate_leng, candidate_index = self.get_input_feat(perm_obs)
 
-
             candidate_feat = candidate_feat.cuda()
             candidate_obj_text_feat = candidate_obj_text_feat.cuda()
             object_mask = object_mask.cuda()
@@ -592,12 +644,17 @@ class Seq2SeqAgent(BaseAgent):
             if speaker is not None:
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
-            # last_h_, _, _, _ = self.decoder(input_a_t, f_t, candidate_feat,
-            #                                 h_t, h1, c_t,
-            #                                 ctx, ctx_mask,
-            #                                 speaker is not None)
+
+            image_num, object_num = candidate_obj_img_feat.shape[1],candidate_obj_img_feat.shape[2]
+            landmark_object_feature = landmark_object_feature.view(batch_size, max_config_num*max_landmark_num, 300) #batch * 180 * 300
+            landmark_similarity = torch.matmul(candidate_obj_text_feat, torch.transpose(landmark_object_feature.unsqueeze(1),3,2))# (4*48*36*300) * (4*1*300*180）-> 4 * 48 * 36*180
+            landmark_similarity = landmark_similarity.view(batch_size, image_num, object_num, max_config_num, max_landmark_num) # 4 * 48 * 36 * 15 * 12
+            landmark_similarity = torch.max(landmark_similarity, dim=-1)[0]
+            weighted_landmark_similarity = torch.matmul(landmark_similarity, torch.transpose(ctx_attn.reshape(ctx_attn.shape[0],1,1,ctx_attn.shape[1]),3,2)).squeeze(-1)
+
+         
             last_h_, _, _, _ = self.decoder(candidate_feat, candidate_obj_text_feat, candidate_obj_img_feat, object_mask, pre_feat,  \
-            h_t, c_t, ctx, ctx_attn, r_t, candidate_index, ctx_mask, t)
+            h_t, c_t, ctx, ctx_attn, r_t, candidate_index, ctx_mask, t, weighted_landmark_similarity)
 
             rl_loss = 0.
 

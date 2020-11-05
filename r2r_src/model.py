@@ -136,6 +136,90 @@ class SoftDotAttention(nn.Module):
             return weighted_context, attn
 
 
+class AttnDecoderLSTM1(nn.Module):
+    ''' An unrolled LSTM with attention over instructions for decoding navigation actions. '''
+
+    def __init__(self, embedding_size, hidden_size,
+                       dropout_ratio, feature_size=2048+4):
+        super(AttnDecoderLSTM1, self).__init__()
+        self.embedding_size = embedding_size
+        self.feature_size = feature_size
+        self.hidden_size = hidden_size
+        self.embedding = nn.Sequential(
+            nn.Linear(args.angle_feat_size, self.embedding_size),
+            nn.Tanh()
+        )
+        self.drop = nn.Dropout(p=dropout_ratio)
+        self.drop_env = nn.Dropout(p=args.featdropout)
+        self.lstm = nn.LSTMCell(embedding_size+feature_size, hidden_size)
+        #self.lstm = nn.LSTMCell(feature_size, hidden_size)
+        self.state_attention = StateAttention()
+        self.feat_att_layer = SoftDotAttention(hidden_size, feature_size)
+        self.candidate_att_layer = SoftDotAttention(hidden_size, feature_size)
+        self.linear_ctx = nn.Linear(1112, hidden_size, bias=False)
+        self.r_linear = nn.Linear(hidden_size, 2)
+        self.sm = nn.Softmax(dim=1)
+        #self.attention_layer = SoftDotAttention(hidden_size, hidden_size)
+        #self.candidate_att_layer = SoftDotAttention(hidden_size, feature_size)
+        
+
+    def forward(self, action, feature, cand_feat,
+                h_0, prev_h1, c_0,
+                ctx, r_t, s_0, step, ctx_mask=None,
+                already_dropfeat=False):
+        '''
+        Takes a single step in the decoder LSTM (allowing sampling).
+        action: batch x angle_feat_size
+        feature: batch x 36 x (feature_size + angle_feat_size)
+        cand_feat: batch x cand x (feature_size + angle_feat_size)
+        h_0: batch x hidden_size
+        prev_h1: batch x hidden_size
+        c_0: batch x hidden_size
+        ctx: batch x seq_len x dim
+        ctx_mask: batch x seq_len - indices to be masked
+        already_dropfeat: used in EnvDrop
+        '''
+        action_embeds = self.embedding(action)
+
+        # Adding Dropout
+        action_embeds = self.drop(action_embeds)
+
+        
+        if not already_dropfeat:
+            # Dropout the raw feature as a common regularization
+            feature[..., :-args.angle_feat_size] = self.drop_env(feature[..., :-args.angle_feat_size])   # Do not drop the last args.angle_feat_size (position feat)
+        
+        prev_h1_drop = self.drop(prev_h1)
+        attn_feat, _ = self.feat_att_layer(prev_h1_drop, feature, output_tilde=False)
+
+        #concat_input = attn_feat
+        concat_input = torch.cat((action_embeds, attn_feat), 1) # (batch, embedding_size+feature_size)
+
+        h_1, c_1 = self.lstm(concat_input, (prev_h1, c_0))
+
+        h_1_drop = self.drop(h_1)
+
+        if r_t is None:
+            r_t = self.r_linear(h_1_drop)
+            r_t = self.sm(r_t)
+
+        h_tilde, ctx_attn = self.state_attention(s_0, r_t, self.linear_ctx(ctx), ctx_mask, step)
+
+
+        #h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
+
+        # Adding Dropout
+        h_tilde_drop = self.drop(h_tilde)
+
+        
+        if not already_dropfeat:
+            cand_feat[..., :-args.angle_feat_size] = self.drop_env(cand_feat[..., :-args.angle_feat_size])
+        
+
+        _, logit = self.candidate_att_layer(h_tilde_drop, cand_feat, output_prob=False)
+
+        return h_1, c_1, logit, h_tilde, ctx_attn
+
 class AttnDecoderLSTM(nn.Module):
     ''' An unrolled LSTM with attention over instructions for decoding navigation actions. '''
 
@@ -394,6 +478,7 @@ class SelfMonitoring(nn.Module):
         # navigable_mask = create_mask(batch_size, self.max_navigable, index_length)
 
         proj_navigable_feat = proj_masking(navigable_feat, self.proj_navigable_mlp, navigable_mask)
+
         proj_pre_feat = self.proj_navigable_mlp(pre_feat)
         positioned_ctx = self.lang_position(ctx)
 
@@ -489,9 +574,6 @@ class ConfiguringObject(nn.Module):
 
         self.proj_out = nn.Linear(rnn_hidden_size, img_fc_dim[-1], bias=fc_bias)
 
-        self.state_attention = StateAttention()
-
-
         self.logit_fc = nn.Linear(rnn_hidden_size * 2 + 300 + 300, img_fc_dim[-1])
         #self.logit_fc = nn.Linear(rnn_hidden_size * 2, img_fc_dim[-1])
 
@@ -506,6 +588,8 @@ class ConfiguringObject(nn.Module):
         #self.config_atten_linear = nn.Linear(768, 128)
 
         self.sm = nn.Softmax(dim=1)
+
+        self.drop_env = nn.Dropout(p=args.featdropout)
 
 
 
@@ -532,8 +616,12 @@ class ConfiguringObject(nn.Module):
 
         # object text feature
         navigable_obj_feat = navigable_obj_feat.view(batch_size, num_heading*num_object, object_feat_dim) #4 x 16*36 x 300 
+        
         # object image feature
         navigable_obj_img_feat = navigable_obj_img_feat.view(batch_size, num_heading*num_object, 152) # 4 x 48*36 x 152
+        
+        navigable_obj_img_feat = self.drop_env(navigable_obj_img_feat)
+        navigable_img_feat[..., :-args.angle_feat_size] = self.drop_env(navigable_img_feat[..., :-args.angle_feat_size])
 
         index_length = [len(_index)+1 for _index in navigable_index]
         

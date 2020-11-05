@@ -1,4 +1,3 @@
-
 import json
 import os
 import sys
@@ -134,7 +133,7 @@ class Seq2SeqAgent(BaseAgent):
         mask = (sorted_tensor == padding_idx)[:,:seq_lengths[0]]    # seq_lengths[0] is the Maximum length
 
         return Variable(sorted_tensor, requires_grad=False).long().cuda(), \
-               mask.bool().cuda(),  \
+               mask.byte().cuda(),  \
                list(seq_lengths), list(perm_idx)
 
     def _feature_variable(self, obs):
@@ -240,7 +239,6 @@ class Seq2SeqAgent(BaseAgent):
         else:
             obs = np.array(self.env._get_obs())
 
-        
         batch_size = len(obs)
 
         if speaker is not None:         # Trigger the self_train mode!
@@ -355,7 +353,6 @@ class Seq2SeqAgent(BaseAgent):
             perm_obs = obs[perm_idx]                    # Perm the obs for the resu
 
             # Calculate the mask and reward
-            '''
             dist = np.zeros(batch_size, np.float32)
             reward = np.zeros(batch_size, np.float32)
             mask = np.ones(batch_size, np.float32)
@@ -382,7 +379,7 @@ class Seq2SeqAgent(BaseAgent):
             rewards.append(reward)
             masks.append(mask)
             last_dist[:] = dist
-            '''
+
             # Update the finished actions
             # -1 means ended or ignored (already ended)
             ended[:] = np.logical_or(ended, (cpu_a_t == -1))
@@ -390,10 +387,11 @@ class Seq2SeqAgent(BaseAgent):
             # Early exit if all ended
             if ended.all(): 
                 break
-        '''
+
         if train_rl:
             # Last action in A2C
             input_a_t, f_t, candidate_feat, candidate_leng = self.get_input_feat(perm_obs)
+            
             if speaker is not None:
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
@@ -440,7 +438,7 @@ class Seq2SeqAgent(BaseAgent):
                 assert args.normalize_loss == 'none'
 
             self.loss += rl_loss
-        '''
+
         if train_ml is not None:
             self.loss += ml_loss * train_ml / batch_size
 
@@ -451,7 +449,7 @@ class Seq2SeqAgent(BaseAgent):
 
         return traj
 
-    def c(self):
+    def _dijkstra(self):
         """
         The dijkstra algorithm.
         Was called beam search to be consistent with existing work.
@@ -856,4 +854,3 @@ class Seq2SeqAgent(BaseAgent):
         for param in all_tuple:
             recover_state(*param)
         return states['encoder']['epoch'] - 1
-

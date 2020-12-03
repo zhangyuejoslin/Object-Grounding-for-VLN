@@ -22,11 +22,17 @@ from param import args
 # padding, unknown word, end of sentence
 base_vocab = ['<PAD>', '<UNK>', '<EOS>']
 padding_idx = base_vocab.index('<PAD>')
+# config = {
+#     'split_file' : 'tasks/R2R/dictionaries/split_dictionary.txt',
+#     'motion_indicator_file' : 'tasks/R2R-pano/data/data/component_data/motion_indicator/motion_dict.txt',
+#     'stop_words_file': 'tasks/R2R/dictionaries/stop_words.txt',
+#     'position_file': 'tasks/R2R-pano/data/data/spatial_position_dic.txt'
+# }
 config = {
-    'split_file' : 'tasks/R2R/dictionaries/split_dictionary.txt',
-    'motion_indicator_file' : 'tasks/R2R-pano/data/data/component_data/motion_indicator/motion_dict.txt',
-    'stop_words_file': 'tasks/R2R/dictionaries/stop_words.txt',
-    'position_file': 'tasks/R2R-pano/data/data/spatial_position_dic.txt'
+    'split_file' : '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/split_dictionary.txt',
+    'motion_indicator_file' : '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/component_data/motion_indicator/motion_dict.txt',
+    'stop_words_file': '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/stop_words.txt',
+    'position_file': '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/spatial_position_dic.txt'
 }
 def split_oder(dictionary):
     return sorted(dictionary, key = lambda x: len(x.split()), reverse=True)
@@ -98,7 +104,7 @@ def load_datasets(splits):
         # if split in ['train', 'val_seen', 'val_unseen', 'test',
         #              'val_unseen_half1', 'val_unseen_half2', 'val_seen_half1', 'val_seen_half2']:       # Add two halves for sanity check
         if "/" not in split:
-            with open('tasks/R2R/data/R2R_%s3.json' % split) as f:
+            with open('tasks/R2R/data/R2R_%s.json' % split) as f:
                 new_data = json.load(f)
         else:
             with open(split) as f:
@@ -114,7 +120,6 @@ def load_datasets(splits):
         data += new_data
     random.setstate(old_state)      # Recover the state of the random generator
     return data
-
 
 def get_configurations(sentence):
     def combine_process(config_list):

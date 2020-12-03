@@ -107,19 +107,19 @@ class Seq2SeqAgent(BaseAgent):
         'num_layers': args.rnn_num_layers
     }
         self.encoder = encoder.EncoderBERT(**encoder_kwargs).cuda()
-    #     policy_model_kwargs = {
-    #     'img_fc_dim': (128,),
-    #     'img_fc_use_batchnorm': 1,
-    #     'img_dropout': 0.5,
-    #     'img_feat_input_dim': self.feature_size + args.angle_feat_size,
-    #     'rnn_hidden_size': 512,
-    #     'rnn_dropout': 0.5,
-    #     'max_len': 80,
-    #     'fc_bias': True, 
-    #     'max_navigable': args.candidate_length + 1
-    # }
-    #     self.decoder = model.ConfiguringObject(**policy_model_kwargs).cuda()
-        
+        policy_model_kwargs = {
+        'img_fc_dim': (128,),
+        'img_fc_use_batchnorm': 1,
+        'img_dropout': 0.5,
+        'img_feat_input_dim': self.feature_size + args.angle_feat_size,
+        'rnn_hidden_size': 512,
+        'rnn_dropout': 0.5,
+        'max_len': 80,
+        'fc_bias': True, 
+        'max_navigable': args.candidate_length + 1
+    }
+        self.decoder = model.ConfiguringObject(**policy_model_kwargs).cuda()
+        #self.decoder = model.AttnDecoderLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda()
         self.critic = model.Critic().cuda()
         self.models = (self.encoder, self.decoder, self.critic)
 
@@ -139,8 +139,11 @@ class Seq2SeqAgent(BaseAgent):
 
         #features
         self.obj_feat = self._obj_feature(args.obj_img_feat_path)
-        self.landmark_feature = self.get_landmark_feature(args.train_landmark_path, args.val_seen_landmark_path, args.val_unseen_landmark_path)
-        self.motion_indicator_feature = self.get_motion_indicator_feature(args.train_motion_indi_path, args.val_seen_motion_indi_path, args.val_unseen_motion_indi_path)
+        self.landmark_feature = self.get_landmark_feature(args.train_landmark_path, args.val_seen_landmark_path, \
+                                                        args.val_unseen_landmark_path, args.test_landmark_path)
+        self.motion_indicator_feature = self.get_motion_indicator_feature(args.train_motion_indi_path, args.val_seen_motion_indi_path, \
+                                            args.val_unseen_motion_indi_path, args.test_motion_indi_path)
+
         
 
 
@@ -190,28 +193,32 @@ class Seq2SeqAgent(BaseAgent):
                     heading_elevation_value['features'] = torch.from_numpy(heading_elevation_value['features']) 
         return all_obj
     
-    def get_landmark_feature(self, train_landmark_dir, val_seen_landmark_dir, val_unseen_landmark_dir):
+    def get_landmark_feature(self, train_landmark_dir, val_seen_landmark_dir, val_unseen_landmark_dir, test_landmark_dir):
         landmark_dict = {}
         landmark_dict1 = np.load(train_landmark_dir, allow_pickle=True).item()
         landmark_dict2 = np.load(val_seen_landmark_dir, allow_pickle=True).item()
         landmark_dict3 = np.load(val_unseen_landmark_dir, allow_pickle=True).item()
-        #landmark_dict4 = np.load('tasks/R2R-pano/landmark_test.npy', allow_pickle=True).item()
+        landmark_dict4 = np.load(test_landmark_dir, allow_pickle=True).item()
+
         landmark_dict.update(landmark_dict1)
         landmark_dict.update(landmark_dict2)
         landmark_dict.update(landmark_dict3)
-        #landmark_dict.update(landmark_dict4)
+        landmark_dict.update(landmark_dict4)
+
         return landmark_dict
     
-    def get_motion_indicator_feature(self, train_motion_indi_dir,val_seen_motion_indi_dir,val_unseen_motion_indi_dir):
+    def get_motion_indicator_feature(self, train_motion_indi_dir,val_seen_motion_indi_dir,val_unseen_motion_indi_dir, test_motion_indi_dir):
         motion_indicator_dict = {}
         motion_indicator_dict1 = np.load(train_motion_indi_dir, allow_pickle=True).item()
         motion_indicator_dict2 = np.load(val_seen_motion_indi_dir, allow_pickle=True).item()
         motion_indicator_dict3 = np.load(val_unseen_motion_indi_dir, allow_pickle=True).item()
+        motion_indicator_dict4 = np.load(test_motion_indi_dir, allow_pickle=True).item()
 
         motion_indicator_dict.update(motion_indicator_dict1)
         motion_indicator_dict.update(motion_indicator_dict2)
         motion_indicator_dict.update(motion_indicator_dict3)
-        #landmark_dict.update(landmark_dict4)
+        motion_indicator_dict.update(motion_indicator_dict4)
+
         return motion_indicator_dict
 
 
@@ -280,6 +287,17 @@ class Seq2SeqAgent(BaseAgent):
         pre_feature[candidate_leng:candidate_leng+interval_len] =  feature[1*interval_len:2*interval_len]
         pre_feature[2*candidate_leng:2*candidate_leng+interval_len] =  feature[2*interval_len:3*interval_len]
     
+    '''
+    def _candidate_variable(self, obs):
+        candidate_leng = [len(ob['candidate']) + 1 for ob in obs]       # +1 is for the end
+        candidate_feat = np.zeros((len(obs), max(candidate_leng), self.feature_size + args.angle_feat_size), dtype=np.float32)
+        # Note: The candidate_feat at len(ob['candidate']) is the feature for the END
+        # which is zero in my implementation
+        for i, ob in enumerate(obs):
+            for j, c in enumerate(ob['candidate']):
+                candidate_feat[i, j, :] = c['feature']                         # Image feat
+        return torch.from_numpy(candidate_feat).cuda(), candidate_leng
+    '''
     def _faster_rcnn_feature(self, ob, heading_list):
         obj_img_feature = []
         obj_text_feature = []
@@ -313,8 +331,10 @@ class Seq2SeqAgent(BaseAgent):
         f_t = self._feature_variable(obs)      # Image features from obs
         #candidate_feat, candidate_leng, candidate_index = self._candidate_variable(obs)
         candidate_feat, candidate_obj_text_feat, object_mask, candidate_obj_img_feat, candidate_leng, candidate_index = self._candidate_variable(obs)
+        #candidate_feat, candidate_leng= self._candidate_variable(obs)
 
         return input_a_t, f_t, candidate_feat, candidate_obj_text_feat, object_mask, candidate_obj_img_feat, candidate_leng, candidate_index
+        #return input_a_t, f_t, candidate_feat, candidate_leng
 
     def _teacher_action(self, obs, ended):
         """
@@ -522,11 +542,13 @@ class Seq2SeqAgent(BaseAgent):
         for t in range(self.episode_len):
 
             input_a_t, f_t, candidate_feat, candidate_obj_text_feat, object_mask, candidate_obj_img_feat, candidate_leng, candidate_index = self.get_input_feat(perm_obs)
-
+        
+            
             candidate_feat = candidate_feat.cuda()
             candidate_obj_text_feat = candidate_obj_text_feat.cuda()
             object_mask = object_mask.cuda()
             candidate_obj_img_feat = candidate_obj_img_feat.cuda()
+            
 
             if speaker is not None:       # Apply the env drop mask to the feat
                 candidate_feat[..., :-args.angle_feat_size] *= noise
@@ -535,16 +557,23 @@ class Seq2SeqAgent(BaseAgent):
             r_t = r0 if t==0 else None
 
             ### landmark_similarity
+            
             image_num, object_num = candidate_obj_img_feat.shape[1],candidate_obj_img_feat.shape[2]
             landmark_object_feature = landmark_object_feature.view(batch_size, max_config_num*max_landmark_num, 300) #batch * 180 * 300
             landmark_similarity = torch.matmul(candidate_obj_text_feat, torch.transpose(landmark_object_feature.unsqueeze(1),3,2))# (4*48*36*300) * (4*1*300*180）-> 4 * 48 * 36*180
             landmark_similarity = landmark_similarity.view(batch_size, image_num, object_num, max_config_num, max_landmark_num) # 4 * 48 * 36 * 15 * 12
             landmark_similarity = torch.max(landmark_similarity, dim=-1)[0]
             weighted_landmark_similarity = torch.matmul(landmark_similarity, torch.transpose(ctx_attn.reshape(ctx_attn.shape[0],1,1,ctx_attn.shape[1]),3,2)).squeeze(-1)
-
+            
             ###
             h_t, c_t, ctx_attn, logit = self.decoder(candidate_feat, candidate_obj_text_feat, candidate_obj_img_feat, object_mask, pre_feat,  \
             h_t, c_t, ctx, ctx_attn, r_t, candidate_index, ctx_mask, t, weighted_landmark_similarity)
+
+            # h_t, c_t, logit, h1, ctx_attn = self.decoder(input_a_t, f_t, candidate_feat,
+            #                                    h_t, h1, c_t,
+            #                                    ctx, r_t, ctx_attn, t, ctx_mask,
+            #                                    already_dropfeat=(speaker is not None))
+            
 
             hidden_states.append(h_t)
 
@@ -640,21 +669,27 @@ class Seq2SeqAgent(BaseAgent):
             candidate_obj_text_feat = candidate_obj_text_feat.cuda()
             object_mask = object_mask.cuda()
             candidate_obj_img_feat = candidate_obj_img_feat.cuda()
+            
 
             if speaker is not None:
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
-
+            
             image_num, object_num = candidate_obj_img_feat.shape[1],candidate_obj_img_feat.shape[2]
             landmark_object_feature = landmark_object_feature.view(batch_size, max_config_num*max_landmark_num, 300) #batch * 180 * 300
             landmark_similarity = torch.matmul(candidate_obj_text_feat, torch.transpose(landmark_object_feature.unsqueeze(1),3,2))# (4*48*36*300) * (4*1*300*180）-> 4 * 48 * 36*180
             landmark_similarity = landmark_similarity.view(batch_size, image_num, object_num, max_config_num, max_landmark_num) # 4 * 48 * 36 * 15 * 12
             landmark_similarity = torch.max(landmark_similarity, dim=-1)[0]
             weighted_landmark_similarity = torch.matmul(landmark_similarity, torch.transpose(ctx_attn.reshape(ctx_attn.shape[0],1,1,ctx_attn.shape[1]),3,2)).squeeze(-1)
-
+            
          
             last_h_, _, _, _ = self.decoder(candidate_feat, candidate_obj_text_feat, candidate_obj_img_feat, object_mask, pre_feat,  \
             h_t, c_t, ctx, ctx_attn, r_t, candidate_index, ctx_mask, t, weighted_landmark_similarity)
+            
+            # last_h_, c_t, logit, h1, ctx_attn = self.decoder(input_a_t, f_t, candidate_feat,
+            #                                    h_t, h1, c_t,
+            #                                    ctx, r_t, ctx_attn, t, ctx_mask,
+            #                                    already_dropfeat=(speaker is not None))
 
             rl_loss = 0.
 

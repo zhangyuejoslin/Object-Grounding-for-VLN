@@ -1,4 +1,3 @@
-
 import torch
 
 import os
@@ -11,7 +10,8 @@ from speaker import Speaker
 from utils import read_vocab,write_vocab,build_vocab,Tokenizer,padding_idx,timeSince, read_img_features
 import utils
 from env import R2RBatch
-from agent import Seq2SeqAgent
+from configuration_agent import Seq2SeqAgent
+#from agent import Seq2SeqAgent
 from eval import Evaluation
 from param import args
 
@@ -233,7 +233,7 @@ def valid(train_env, tok, val_envs={}):
                 loss_str += ', %s: %.4f' % (metric, val)
             print(loss_str)
 
-        if args.submit:
+        if env_name=='test' and args.submit:
             json.dump(
                 result,
                 open(os.path.join(log_dir, "submit_%s.json" % env_name), 'w'),
@@ -360,7 +360,8 @@ def train_val():
     train_env = R2RBatch(feat_dict, batch_size=args.batchSize, splits=['train'], tokenizer=tok)
     from collections import OrderedDict
 
-    val_env_names = ['val_unseen', 'val_seen']
+    #val_env_names = ['val_unseen', 'val_seen']
+    val_env_names = []
     if args.submit:
         val_env_names.append('test')
     else:
@@ -455,7 +456,8 @@ def train_val_augment():
     # Setup the validation data
     val_envs = {split: (R2RBatch(feat_dict, batch_size=args.batchSize, splits=[split],
                                  tokenizer=tok), Evaluation([split], featurized_scans, tok))
-                for split in ['train', 'val_seen', 'val_unseen']}
+                for split in ['train', 'val_seen', 'val_unseen']
+                }
 
     # Start training
     train(train_env, tok, args.iters, val_envs=val_envs, aug_env=aug_env)
@@ -469,4 +471,3 @@ if __name__ == "__main__":
         train_val_augment()
     else:
         assert False
-

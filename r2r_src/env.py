@@ -355,5 +355,3 @@ class R2RBatch():
         stats['length'] = length / len(self.data)
         stats['path'] = path / len(self.data)
         return stats
-
-

@@ -391,7 +391,6 @@ class Seq2SeqAgent(BaseAgent):
         if train_rl:
             # Last action in A2C
             input_a_t, f_t, candidate_feat, candidate_leng = self.get_input_feat(perm_obs)
-            
             if speaker is not None:
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise

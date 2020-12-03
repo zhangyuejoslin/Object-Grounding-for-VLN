@@ -323,10 +323,10 @@ class Seq2SeqAgent(BaseAgent):
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
             
+        
 
-            h_t, c_t, h1, logit = self.decoder(
-                f_t, candidate_feat, pre_feat, h_t, c_t, ctx,
-                h1, candidate_index, ctx_mask)
+            h_t, c_t, logit = self.decoder(
+                f_t, candidate_feat, pre_feat, h_t, c_t, ctx, candidate_index, ctx_mask)
 
             hidden_states.append(h_t)
 
@@ -424,9 +424,9 @@ class Seq2SeqAgent(BaseAgent):
             #                                 h_t, h1, c_t,
             #                                 ctx, ctx_mask,
             #                                 speaker is not None)
-            last_h_, c_t, h1, logit = self.decoder(
+            last_h_, c_t, logit = self.decoder(
                 f_t, candidate_feat, pre_feat, h_t, c_t, ctx,
-                h1, candidate_index, ctx_mask)
+                 candidate_index, ctx_mask)
 
             rl_loss = 0.
 

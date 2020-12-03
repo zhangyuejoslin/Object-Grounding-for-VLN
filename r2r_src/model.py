@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
@@ -6,6 +5,7 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from param import args
 from modules import build_mlp, SoftAttention, PositionalEncoding, ScaledDotProductAttention, create_mask, create_mask_for_object, proj_masking, StateAttention, ConfigObjAttention
+
 
 
 class EncoderLSTM(nn.Module):
@@ -46,20 +46,12 @@ class EncoderLSTM(nn.Module):
         ), requires_grad=False)
 
         return h0.cuda(), c0.cuda()
-    
-    def create_mask(self, batchsize, max_length, length):
-        """Given the length create a mask given a padded tensor"""
-        tensor_mask = torch.zeros(batchsize, max_length)
-        for idx, row in enumerate(tensor_mask):
-            row[:length[idx]] = 1
-        return tensor_mask.cuda()
 
     def forward(self, inputs, lengths):
         ''' Expects input vocab indices as (batch, seq_len). Also requires a 
             list of lengths for dynamic batching. '''
         embeds = self.embedding(inputs)  # (batch, seq_len, embedding_size)
         embeds = self.drop(embeds)
-        embeds_mask = self.create_mask(embeds.size(0), max(lengths).item(), lengths)
         h0, c0 = self.init_state(inputs)
         packed_embeds = pack_padded_sequence(embeds, lengths, batch_first=True)
         enc_h, (enc_h_t, enc_c_t) = self.lstm(packed_embeds, (h0, c0))
@@ -85,14 +77,12 @@ class EncoderLSTM(nn.Module):
         if args.zero_init:
             return ctx, torch.zeros_like(decoder_init), torch.zeros_like(c_t)
         else:
-            #return ctx, decoder_init, c_t, embeds_mask  # (batch, seq_len, hidden_size*num_directions)
+            return ctx, decoder_init, c_t  # (batch, seq_len, hidden_size*num_directions)
                                  # (batch, hidden_size)
-            return ctx, decoder_init, c_t
 
 
 class SoftDotAttention(nn.Module):
     '''Soft Dot Attention. 
-
     Ref: http://www.aclweb.org/anthology/D15-1166
     Adapted from PyTorch OPEN NMT.
     '''
@@ -108,7 +98,6 @@ class SoftDotAttention(nn.Module):
     def forward(self, h, context, mask=None,
                 output_tilde=True, output_prob=True):
         '''Propagate h through the network.
-
         h: batch x dim
         context: batch x seq_len x dim
         mask: batch x seq_len indices to be masked
@@ -136,90 +125,6 @@ class SoftDotAttention(nn.Module):
             return weighted_context, attn
 
 
-class AttnDecoderLSTM1(nn.Module):
-    ''' An unrolled LSTM with attention over instructions for decoding navigation actions. '''
-
-    def __init__(self, embedding_size, hidden_size,
-                       dropout_ratio, feature_size=2048+4):
-        super(AttnDecoderLSTM1, self).__init__()
-        self.embedding_size = embedding_size
-        self.feature_size = feature_size
-        self.hidden_size = hidden_size
-        self.embedding = nn.Sequential(
-            nn.Linear(args.angle_feat_size, self.embedding_size),
-            nn.Tanh()
-        )
-        self.drop = nn.Dropout(p=dropout_ratio)
-        self.drop_env = nn.Dropout(p=args.featdropout)
-        self.lstm = nn.LSTMCell(embedding_size+feature_size, hidden_size)
-        #self.lstm = nn.LSTMCell(feature_size, hidden_size)
-        self.state_attention = StateAttention()
-        self.feat_att_layer = SoftDotAttention(hidden_size, feature_size)
-        self.candidate_att_layer = SoftDotAttention(hidden_size, feature_size)
-        self.linear_ctx = nn.Linear(1112, hidden_size, bias=False)
-        self.r_linear = nn.Linear(hidden_size, 2)
-        self.sm = nn.Softmax(dim=1)
-        #self.attention_layer = SoftDotAttention(hidden_size, hidden_size)
-        #self.candidate_att_layer = SoftDotAttention(hidden_size, feature_size)
-        
-
-    def forward(self, action, feature, cand_feat,
-                h_0, prev_h1, c_0,
-                ctx, r_t, s_0, step, ctx_mask=None,
-                already_dropfeat=False):
-        '''
-        Takes a single step in the decoder LSTM (allowing sampling).
-        action: batch x angle_feat_size
-        feature: batch x 36 x (feature_size + angle_feat_size)
-        cand_feat: batch x cand x (feature_size + angle_feat_size)
-        h_0: batch x hidden_size
-        prev_h1: batch x hidden_size
-        c_0: batch x hidden_size
-        ctx: batch x seq_len x dim
-        ctx_mask: batch x seq_len - indices to be masked
-        already_dropfeat: used in EnvDrop
-        '''
-        action_embeds = self.embedding(action)
-
-        # Adding Dropout
-        action_embeds = self.drop(action_embeds)
-
-        
-        if not already_dropfeat:
-            # Dropout the raw feature as a common regularization
-            feature[..., :-args.angle_feat_size] = self.drop_env(feature[..., :-args.angle_feat_size])   # Do not drop the last args.angle_feat_size (position feat)
-        
-        prev_h1_drop = self.drop(prev_h1)
-        attn_feat, _ = self.feat_att_layer(prev_h1_drop, feature, output_tilde=False)
-
-        #concat_input = attn_feat
-        concat_input = torch.cat((action_embeds, attn_feat), 1) # (batch, embedding_size+feature_size)
-
-        h_1, c_1 = self.lstm(concat_input, (prev_h1, c_0))
-
-        h_1_drop = self.drop(h_1)
-
-        if r_t is None:
-            r_t = self.r_linear(h_1_drop)
-            r_t = self.sm(r_t)
-
-        h_tilde, ctx_attn = self.state_attention(s_0, r_t, self.linear_ctx(ctx), ctx_mask, step)
-
-
-        #h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
-
-        # Adding Dropout
-        h_tilde_drop = self.drop(h_tilde)
-
-        
-        if not already_dropfeat:
-            cand_feat[..., :-args.angle_feat_size] = self.drop_env(cand_feat[..., :-args.angle_feat_size])
-        
-
-        _, logit = self.candidate_att_layer(h_tilde_drop, cand_feat, output_prob=False)
-
-        return h_1, c_1, logit, h_tilde, ctx_attn
-
 class AttnDecoderLSTM(nn.Module):
     ''' An unrolled LSTM with attention over instructions for decoding navigation actions. '''
 
@@ -236,7 +141,6 @@ class AttnDecoderLSTM(nn.Module):
         self.drop = nn.Dropout(p=dropout_ratio)
         self.drop_env = nn.Dropout(p=args.featdropout)
         self.lstm = nn.LSTMCell(embedding_size+feature_size, hidden_size)
-        #self.lstm = nn.LSTMCell(feature_size, hidden_size)
         self.feat_att_layer = SoftDotAttention(hidden_size, feature_size)
         self.attention_layer = SoftDotAttention(hidden_size, hidden_size)
         self.candidate_att_layer = SoftDotAttention(hidden_size, feature_size)
@@ -262,17 +166,14 @@ class AttnDecoderLSTM(nn.Module):
         # Adding Dropout
         action_embeds = self.drop(action_embeds)
 
-        '''
         if not already_dropfeat:
             # Dropout the raw feature as a common regularization
             feature[..., :-args.angle_feat_size] = self.drop_env(feature[..., :-args.angle_feat_size])   # Do not drop the last args.angle_feat_size (position feat)
-        '''
+
         prev_h1_drop = self.drop(prev_h1)
         attn_feat, _ = self.feat_att_layer(prev_h1_drop, feature, output_tilde=False)
 
-        #concat_input = attn_feat
         concat_input = torch.cat((action_embeds, attn_feat), 1) # (batch, embedding_size+feature_size)
-
         h_1, c_1 = self.lstm(concat_input, (prev_h1, c_0))
 
         h_1_drop = self.drop(h_1)
@@ -281,10 +182,8 @@ class AttnDecoderLSTM(nn.Module):
         # Adding Dropout
         h_tilde_drop = self.drop(h_tilde)
 
-        '''
         if not already_dropfeat:
             cand_feat[..., :-args.angle_feat_size] = self.drop_env(cand_feat[..., :-args.angle_feat_size])
-        '''
 
         _, logit = self.candidate_att_layer(h_tilde_drop, cand_feat, output_prob=False)
 
@@ -399,113 +298,6 @@ class SpeakerDecoder(nn.Module):
         logit = self.projection(x)
 
         return logit, h1, c1
-
-
-
-
-
-class SelfMonitoring(nn.Module):
-    """ An unrolled LSTM with attention over instructions for decoding navigation actions. """
-
-    def __init__(self, img_fc_dim, img_dropout, img_feat_input_dim,
-                rnn_hidden_size, rnn_dropout, max_len, fc_bias=True):
-        super(SelfMonitoring, self).__init__()
-
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        self.feature_size = img_feat_input_dim
-        self.hidden_size = rnn_hidden_size
-        self.max_len = max_len
-
-        proj_navigable_kwargs = {
-            'input_dim': img_feat_input_dim,
-            'hidden_dims': img_fc_dim,
-            'use_batchnorm': 1,
-            'dropout': img_dropout,
-            'fc_bias': fc_bias,
-            'relu': 1
-        }
-        self.proj_navigable_mlp = build_mlp(**proj_navigable_kwargs)
-
-        self.h0_fc = nn.Linear(rnn_hidden_size, img_fc_dim[-1], bias=fc_bias)
-        self.h1_fc = nn.Linear(rnn_hidden_size, rnn_hidden_size, bias=fc_bias)
-        self.h2_fc = nn.Linear(rnn_hidden_size, rnn_hidden_size, bias=fc_bias)
-
-        self.soft_attn = SoftAttention()
-
-        self.dropout = nn.Dropout(p=rnn_dropout)
-
-        self.lstm = nn.LSTMCell(img_fc_dim[-1] * 2 + rnn_hidden_size, rnn_hidden_size)
-
-        self.lang_position = PositionalEncoding(rnn_hidden_size, dropout=0.1, max_len=max_len)
-
-        self.logit_fc = nn.Linear(rnn_hidden_size * 2, img_fc_dim[-1])
-        self.h2_fc_lstm = nn.Linear(rnn_hidden_size + img_fc_dim[-1], rnn_hidden_size, bias=fc_bias)
-
-        monitor_sigmoid = False
-
-        if monitor_sigmoid:
-            self.critic = nn.Sequential(
-                nn.Linear(max_len + rnn_hidden_size, 1),
-                nn.Sigmoid()
-            )
-        else:
-            self.critic = nn.Sequential(
-                nn.Linear(max_len + rnn_hidden_size, 1),
-                nn.Tanh()
-            )
-
-        self.num_predefined_action = 1
-
-    def forward(self, img_feat, navigable_feat, pre_feat, h_0, c_0, ctx,
-                navigable_index=None, ctx_mask=None):
-        """ Takes a single step in the decoder
-        img_feat: batch x 36 x feature_size
-        navigable_feat: batch x max_navigable x feature_size
-        pre_feat: previous attended feature, batch x feature_size
-        question: this should be a single vector representing instruction
-        ctx: batch x seq_len x dim
-        navigable_index: list of list
-        ctx_mask: batch x seq_len - indices to be masked
-        """
-        batch_size, num_imgs, feat_dim = img_feat.size()
-        max_navigable = navigable_feat.shape[1]
-
-        index_length = [len(_index) + self.num_predefined_action for _index in navigable_index]
-        navigable_mask = create_mask(batch_size, max_navigable, index_length)
-
-        # index_length = [len(_index) + self.num_predefined_action for _index in navigable_index]
-        # navigable_mask = create_mask(batch_size, self.max_navigable, index_length)
-
-        proj_navigable_feat = proj_masking(navigable_feat, self.proj_navigable_mlp, navigable_mask)
-
-        proj_pre_feat = self.proj_navigable_mlp(pre_feat)
-        positioned_ctx = self.lang_position(ctx)
-
-        weighted_ctx, ctx_attn = self.soft_attn(self.h1_fc(h_0), positioned_ctx, mask=ctx_mask)
-
-        weighted_img_feat, img_attn = self.soft_attn(self.h0_fc(h_0), proj_navigable_feat, mask=navigable_mask)
-
-        # merge info into one LSTM to be carry through time
-        concat_input = torch.cat((proj_pre_feat, weighted_img_feat, weighted_ctx), 1)
-
-        h_1, c_1 = self.lstm(concat_input, (h_0, c_0))
-        h_1_drop = self.dropout(h_1)
-
-        # policy network
-       # new_weighted_ctx, new_ctx_attn = self.soft_attn(self.h2_fc(h_1_drop), positioned_ctx, mask=ctx_mask)
-        #h_tilde = self.logit_fc(torch.cat((new_weighted_ctx, h_1_drop), dim=1))
-        h_tilde = self.logit_fc(torch.cat((weighted_ctx, h_1_drop), dim=1))
-        logit = torch.bmm(proj_navigable_feat, h_tilde.unsqueeze(2)).squeeze(2)
-
-        # value estimation
-        concat_value_input = self.h2_fc_lstm(torch.cat((h_0, weighted_img_feat), 1))
-
-        h_1_value = self.dropout(torch.sigmoid(concat_value_input) * torch.tanh(c_1))
-
-        #value = self.critic(torch.cat((ctx_attn, h_1_value), dim=1))
-
-        return h_1, c_1, logit
 
 
 class ConfiguringObject(nn.Module):
@@ -666,6 +458,3 @@ class ConfiguringObject(nn.Module):
         logit = logit[:,0:int(num_heading/3)] + logit[:,int(num_heading/3):2*int(num_heading/3)] + logit[:,2*int(num_heading/3):num_heading]
     
         return h_1, c_1, ctx_attn, logit
-
-
-

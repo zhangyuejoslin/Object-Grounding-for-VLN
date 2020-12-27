@@ -10,8 +10,9 @@ from speaker import Speaker
 from utils import read_vocab,write_vocab,build_vocab,Tokenizer,padding_idx,timeSince, read_img_features
 import utils
 from env import R2RBatch
-from configuration_agent import Seq2SeqAgent
+#from configuration_agent import Seq2SeqAgent
 #from agent import Seq2SeqAgent
+from configuration_relation_agent import Seq2SeqAgent
 from eval import Evaluation
 from param import args
 
@@ -31,6 +32,8 @@ TRAINVAL_VOCAB = 'tasks/R2R/data/trainval_vocab.txt'
 
 IMAGENET_FEATURES = 'img_features/ResNet-152-imagenet.tsv'
 PLACE365_FEATURES = 'img_features/ResNet-152-places365.tsv'
+
+result_path = "/VL/space/zhan1624/R2R-EnvDrop/result/agent/"
 
 if args.features == 'imagenet':
     features = IMAGENET_FEATURES
@@ -116,6 +119,7 @@ def train(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env=None):
         start_iter = listner.load(os.path.join(args.load))
 
     start = time.time()
+    experiment_time = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
 
     best_val = {'val_seen': {"accu": 0., "state":"", 'update':False},
                 'val_unseen': {"accu": 0., "state":"", 'update':False}}
@@ -192,6 +196,7 @@ def train(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env=None):
                             best_val[env_name]['accu'] = val
                             best_val[env_name]['update'] = True
                 loss_str += ', %s: %.3f' % (metric, val)
+        
 
         for env_name in best_val:
             if best_val[env_name]['update']:
@@ -201,6 +206,10 @@ def train(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env=None):
 
         print(('%s (%d %d%%) %s' % (timeSince(start, float(iter)/n_iters),
                                              iter, float(iter)/n_iters*100, loss_str)))
+        with open(result_path+str(experiment_time)+".txt", "a") as f_result:
+            f_result.write(('%s (%d %d%%) %s' % (timeSince(start, float(iter)/n_iters),
+                                             iter, float(iter)/n_iters*100, loss_str)))
+            f_result.write('\n')
 
         if iter % 1000 == 0:
             print("BEST RESULT TILL NOW")
@@ -360,16 +369,17 @@ def train_val():
     train_env = R2RBatch(feat_dict, batch_size=args.batchSize, splits=['train'], tokenizer=tok)
     from collections import OrderedDict
 
-    #val_env_names = ['val_unseen', 'val_seen']
-    val_env_names = []
+    val_env_names = ['val_unseen', 'val_seen']
+    #val_env_names = []
     if args.submit:
         val_env_names.append('test')
     else:
         pass
+        # if you want to test "train", just uncomment this
         #val_env_names.append('train')
 
     if not args.beam:
-        val_env_names.append("train")
+        val_env_names.append("train") 
 
     val_envs = OrderedDict(
         ((split,

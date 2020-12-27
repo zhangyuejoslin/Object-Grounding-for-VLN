@@ -4,6 +4,7 @@ import os
 import sys
 import re
 from itertools import chain
+import spacy
 
 
 sys.path.append('build')
@@ -17,25 +18,21 @@ from collections import Counter, defaultdict
 import numpy as np
 import networkx as nx
 from param import args
-
+nlp1 = spacy.load("en_core_web_lg")
 
 # padding, unknown word, end of sentence
 base_vocab = ['<PAD>', '<UNK>', '<EOS>']
 padding_idx = base_vocab.index('<PAD>')
-# config = {
-#     'split_file' : 'tasks/R2R/dictionaries/split_dictionary.txt',
-#     'motion_indicator_file' : 'tasks/R2R-pano/data/data/component_data/motion_indicator/motion_dict.txt',
-#     'stop_words_file': 'tasks/R2R/dictionaries/stop_words.txt',
-#     'position_file': 'tasks/R2R-pano/data/data/spatial_position_dic.txt'
-# }
 config = {
     'split_file' : '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/split_dictionary.txt',
     'motion_indicator_file' : '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/component_data/motion_indicator/motion_dict.txt',
     'stop_words_file': '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/stop_words.txt',
-    'position_file': '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/spatial_position_dic.txt'
+    'position_file': '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/spatial_position_dic.txt',
+    'spatial_indicator_file': '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/spatial_indicator.txt'
 }
 def split_oder(dictionary):
     return sorted(dictionary, key = lambda x: len(x.split()), reverse=True)
+
 with open(config['split_file']) as f_dict:
     dictionary = f_dict.read().split('\n')
     dictionary = split_oder(dictionary)
@@ -43,9 +40,24 @@ with open(config['split_file']) as f_dict:
     dictionary = dictionary + tmp_dict
     dictionary = [" "+each_phrase.strip()+" " for each_phrase in dictionary]
 
+with open(config['motion_indicator_file']) as f_dict:
+    motion_dict = f_dict.read().split('\n')
+    motion_dict = [each_motion.strip() for each_motion in motion_dict]
+    motion_dict = split_oder(motion_dict)
+
 with open(config["stop_words_file"]) as f_stop_word:
     stopword = f_stop_word.read().split('\n')
     stopword = split_oder(stopword)
+
+
+def read_file(file_path):
+    with open(file_path) as f_dict:
+        read_list = f_dict.read().split('\n')
+        read_list = [each.strip() for each in read_list]
+        read_list = split_oder(read_list)
+    return read_list
+position_list = read_file(config['position_file'])  
+spatial_indicator_list = read_file(config['spatial_indicator_file'])
 
 # later for motion indicator and landmarks
 
@@ -82,6 +94,135 @@ def load_nav_graphs(scans):
             graphs[scan] = G
     return graphs
 
+def get_landmark_triplet(test_sentence):
+    def get_vector_represent(triplets):
+        triplet_num = len(triplets)
+        triplet_array = np.zeros((triplet_num,3,300))
+        for id, each_triplet in enumerate(triplets):
+            assert len(each_triplet) <= 3
+            if id > 4:
+                break
+            for element_id, each_element in enumerate(each_triplet):
+                tmp_list = []
+                if not each_element:
+                    triplet_array[id][element_id] = np.zeros(300)
+                    continue
+                each_element_doc = nlp1(each_element)
+                for e_e_d in each_element_doc:
+                    tmp_list.append(e_e_d.vector)
+                triplet_array[id][element_id] = np.mean(np.array(tmp_list), axis=0)
+        
+        return triplet_array
+    doc = nlp1(test_sentence)
+    start_id = 0
+    end_id = 0
+    landmark_stopwords = ['right', 'left','front','them', 'you','end','top', 'bottom','it','middle','side']
+    specific_token_list = ['of']
+    triplets = []
+    flag = 0
+    if test_sentence in motion_dict:
+        landmark_triplet = []
+        triplet_vector= np.zeros((1,3,300))
+        return landmark_triplet, triplet_vector
+    else:
+        #check whether two landmarks could be combined together
+        noun_chunks = list(doc.noun_chunks)
+        noun_chunks = [each_chunk for each_chunk in noun_chunks if each_chunk.text not in landmark_stopwords]
+        chunk_length = len(noun_chunks)
+        if chunk_length == 0:
+            landmark_triplet = []
+            triplet_vector= np.zeros((1,3,300))
+            return landmark_triplet, triplet_vector
+
+        if chunk_length == 1:
+            triplets.append([noun_chunks[0].text])
+        else:
+            for e_c_id, each_chunk in enumerate(noun_chunks):  
+                if e_c_id == chunk_length-1:
+                    if flag:
+                        break
+                    else:
+                        triplets.append([each_chunk.text])
+                        break
+                next_chunk = noun_chunks[e_c_id+1]
+                start_id = each_chunk.end
+                end_id = next_chunk.start
+                start_phrase = doc[start_id:end_id]
+                flag = 0
+                while start_id < end_id:
+                    if start_phrase.text in position_list or start_phrase.text in spatial_indicator_list or start_phrase.text in specific_token_list:
+                        flag = 1
+                        triplets.append([each_chunk.text, start_phrase.text, next_chunk.text])
+                        break
+                    start_id = start_id + 1
+                    start_phrase = doc[start_id: end_id]
+                if not flag:
+                    triplets.append([each_chunk.text])
+
+    new_triplet = []
+    for each_tr in triplets:
+        tmp_list = []
+        ### "and" "or" cases (only one component)
+        if " and " in each_tr:
+            tmp_list = each_tr.split('and') 
+        elif " or " in each_tr:
+            tmp_list = each_tr.split('or')
+        if tmp_list:
+            for each_t in tmp_list:
+                new_triplet.append([each_t])
+        else:
+            if len(each_tr) == 3 and each_tr[1] in specific_token_list:
+                new_triplet.append([" ".join(each_tr)])
+            else:    
+                new_triplet.append(each_tr)
+
+    triplet_vector = get_vector_represent(new_triplet)
+            
+    return new_triplet, triplet_vector
+    
+def get_landmark(each_configuration):
+    doc = nlp1(each_configuration)
+    landmark_stopwords = ['right', 'left','front','them', 'you','end','top', 'bottom','it','middle','side']
+    landmark_list =[]
+    landmark_text_list = []
+    if each_configuration in motion_dict:
+        landmark_list=[("", np.zeros(300))]
+        return landmark_list
+
+    for chunk in doc.noun_chunks:
+        landmark_text = chunk.root.text
+        landmark_vector = nlp1(landmark_text).vector
+        if landmark_text not in landmark_stopwords and landmark_text not in landmark_text_list:
+            landmark_list.append((landmark_text, landmark_vector))
+            landmark_text_list.append(landmark_text)
+    if not landmark_list:
+        landmark_list=[("", np.zeros(300))]
+    return landmark_list
+
+def get_motion_indicators(each_configuration):
+    motion_indicator = ""
+    for each_word in motion_dict:
+        if each_word in each_configuration:
+            motion_indicator = each_word
+    if motion_indicator == '':
+        doc = nlp1(each_configuration)
+        for token_id, token in enumerate(doc):
+            try:
+                if token.pos_ == "VERB" and doc[token_id+1].pos_ == "ADP":
+                    motion_indicator = token.text + " " + doc[token_id+1].text
+                elif token.pos_ == "VERB":
+                    motion_indicator = token.text 
+                else:
+                    motion_indicator = doc[0].text    
+            except IndexError:
+                    motion_indicator = token.text  
+    motion_doc = nlp1(motion_indicator)
+    sum_list = []
+    for motion_token in motion_doc:
+        sum_list.append(nlp1(motion_token.text).vector)
+    motion_indicator_vector = np.mean(np.array(sum_list), axis=0)
+    return (motion_indicator, motion_indicator_vector)
+
 
 def load_datasets(splits):
     """
@@ -104,7 +245,7 @@ def load_datasets(splits):
         # if split in ['train', 'val_seen', 'val_unseen', 'test',
         #              'val_unseen_half1', 'val_unseen_half2', 'val_seen_half1', 'val_seen_half2']:       # Add two halves for sanity check
         if "/" not in split:
-            with open('tasks/R2R/data/R2R_%s.json' % split) as f:
+            with open('tasks/R2R/data/R2R_%s3.json' % split) as f:
                 new_data = json.load(f)
         else:
             with open(split) as f:

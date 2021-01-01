@@ -494,7 +494,7 @@ class ConfiguringRelationObject(nn.Module):
        
         proj_navigable_img_kwargs2 = {
              #add 36 if add similarity
-            'input_dim': img_feat_input_dim+36,
+            'input_dim': img_feat_input_dim+18,
             'hidden_dims': img_fc_dim,
             'use_batchnorm': img_fc_use_batchnorm,
             'dropout': img_dropout,
@@ -505,7 +505,6 @@ class ConfiguringRelationObject(nn.Module):
 
 
         self.h0_fc = nn.Linear(rnn_hidden_size, img_fc_dim[-1], bias=False)
-        self.next_h0_fc = nn.Linear(256, 128, bias=False)
 
         self.soft_attn = SoftAttention()
         self.state_attention = StateAttention()
@@ -517,17 +516,9 @@ class ConfiguringRelationObject(nn.Module):
         self.lstm = nn.LSTMCell(img_fc_dim[-1] + rnn_hidden_size + 300 + 300 , rnn_hidden_size)
 
         #self.lstm = nn.LSTMCell(img_fc_dim[-1] * 2 + rnn_hidden_size, rnn_hidden_size)
-        self.triplet_arg1_fc = nn.Linear(300, 128, bias=False) # trajector
-        self.triplet_arg2_fc = nn.Linear(300, 128, bias=False) # relation
-        self.triplet_arg3_fc = nn.Linear(300, 128, bias=False) # landmark
 
-        self.obj_rel_arg1 = nn.Linear(152, 128, bias=False) # obj1
-        self.obj_rel_arg2 = nn.Linear(12, 128, bias=False) # obj_relation
-        self.obj_rel_arg3 = nn.Linear(152, 128, bias=False) # obj2
 
         self.h1_fc = nn.Linear(rnn_hidden_size, rnn_hidden_size, bias=False)
-
-        self.h2_fc_lstm = nn.Linear(rnn_hidden_size + img_fc_dim[-1], rnn_hidden_size, bias=fc_bias)
 
         self.proj_out = nn.Linear(rnn_hidden_size, img_fc_dim[-1], bias=fc_bias)
 
@@ -548,17 +539,11 @@ class ConfiguringRelationObject(nn.Module):
 
         self.drop_env = nn.Dropout(p=args.featdropout)
 
+        self.obj_rel_arg2 = nn.Linear(12, 300, bias=False) # obj_relation
 
 
-        self.r_transform = Variable(torch.tensor([[1,0,0.75,0.5],[0,1,0.25,0.5]]).transpose(0,1), requires_grad=False)
-        self.ho_trans = nn.Linear(768, 512)
-        self.h0_next = nn.Linear(rnn_hidden_size, img_fc_dim[-1], bias=False)
-
-
-    # def forward(self, navigable_img_feat, navigable_obj_feat, navigable_obj_img_feat, object_mask, pre_feat, h_0, c_0, ctx, 
-    #             s_0, r_t, navigable_index, ctx_mask, step, landmark_similarity, triplet_tensor, candidate_obj_relation_feat):
     def forward(self, navigable_img_feat, navigable_obj_feat, navigable_obj_img_feat, object_mask, pre_feat, h_0, c_0, ctx, 
-                s_0, r_t, navigable_index, ctx_mask, step, triplet_tensor, candidate_obj_relation_feat):
+                s_0, r_t, navigable_index, ctx_mask, step, triplet_tensor, candidate_obj_relation_feat, obj_rel_arg_feat):
 
         """ Takes a single step in the decoder LSTM.
         config_embedding: batch x max_config_len x config embeddding
@@ -574,10 +559,10 @@ class ConfiguringRelationObject(nn.Module):
         batch_size, num_heading, num_object, object_feat_dim = navigable_obj_feat.size()
         config_num = ctx.shape[1]
         triplet_num = triplet_tensor.shape[2]
-        triplet_dim = 300*3
+        triplet_dim = 300
 
         # object text feature
-        #navigable_obj_feat = navigable_obj_feat.view(batch_size, num_heading*num_object, object_feat_dim) #4 x 16*36 x 300 
+        navigable_obj_feat = navigable_obj_feat.view(batch_size, num_heading*num_object, object_feat_dim) #4 x 16*36 x 300 
         
         # object image feature
         navigable_obj_img_feat = navigable_obj_img_feat.view(batch_size, num_heading*num_object, 152) # 4 x 48*36 x 152
@@ -589,31 +574,28 @@ class ConfiguringRelationObject(nn.Module):
         
         navigable_mask = create_mask(batch_size, int(num_heading/3), index_length)
 
-        triplet_arg1 = triplet_tensor[:,:,:,0,:]
-        triplet_arg2 = triplet_tensor[:,:,:,1,:]
-        triplet_arg3 = triplet_tensor[:,:,:,2,:]
-
-        triplet_feat = torch.cat([triplet_arg1, triplet_arg2, triplet_arg3], dim=-1) # batch*config_size*triplet_size,900
-        triplet_feat = torch.transpose(triplet_feat.view(batch_size,config_num,triplet_num*triplet_dim),1,2) # batch*config_size*triplet_size*900
-        triplet_feat = torch.transpose(torch.matmul(triplet_feat, ctx_attn.unsqueeze(-1)).squeeze(-1).view(batch_size,triplet_num,triplet_dim),1,2)#batch*triplet_size*900
-
-        obj_rel1 = candidate_obj_relation_feat[:,:,:,:,0:152]
-        obj_rel2 = candidate_obj_relation_feat[:,:,:,:,152:152+12]
-        obj_rel3 = candidate_obj_relation_feat[:,:,:,:,152+12:2*152+12]
-
-        obj_rel_feat = torch.cat([obj_rel1,  obj_rel2, obj_rel3], dim=-1)
-        obj_rel_feat = obj_rel_feat.view(batch_size, num_heading*num_object*num_object, triplet_dim)
-        obj_rel_feat = torch.bmm(obj_rel_feat, triplet_feat).view(batch_size, num_heading, num_object*num_object*triplet_num)
-        weighted_obj_rel_feat = self.sm(torch.mean(obj_rel_feat, dim=-1))
-
         
+        triplet_feat = triplet_tensor.view(batch_size, -1, triplet_dim*3)
+        tmp_obj_feat = torch.cat((obj_rel_arg_feat[:,:,:,:,:300], self.obj_rel_arg2(candidate_obj_relation_feat), obj_rel_arg_feat[:,:,:,:,300:2*300]), dim=-1).view(batch_size, num_heading*num_object*num_object, triplet_dim*3)
+        weighted_obj_rel_feat = torch.mean(torch.bmm(tmp_obj_feat, triplet_feat.transpose(1,2)).view(batch_size, num_heading, num_object, num_object*config_num*triplet_num), dim=-1)
+        '''
+        obj_rel2 = candidate_obj_relation_feat[:,:,:,:,300:300+12].cuda()
+        obj_rel_arg2 = self.obj_rel_arg2(obj_rel2)
+        tmp_obj_feat = torch.zeros(batch_size, num_heading, num_object, num_object, triplet_dim*3).cuda()
+        tmp_obj_feat[:,:,:,:,0:triplet_dim] = candidate_obj_relation_feat[:,:,:,:,0:triplet_dim]
+        tmp_obj_feat[:,:,:,:,1*triplet_dim:2*triplet_dim] = obj_rel_arg2
+        tmp_obj_feat[:,:,:,:,2*triplet_dim:3*triplet_dim] =candidate_obj_relation_feat[:,:,:,:,triplet_dim+12:3*triplet_dim]
+        tmp_obj_feat = tmp_obj_feat.view(batch_size, num_heading*num_object*num_object, triplet_dim*3)
+        #weighted_obj_rel_feat = torch.mean((torch.bmm(tmp_obj_feat, triplet_feat.transpose(1,2))*s_0.view(batch_size,1, config_num,1))).view(batch_size, num_heading, num_object, num_object*config_num*triplet_num), dim=-1)
+        weighted_obj_rel_feat = torch.mean(torch.bmm(tmp_obj_feat, triplet_feat.transpose(1,2)).view(batch_size, num_heading, num_object, num_object*config_num*triplet_num), dim=-1)
+        '''
         # not add similarity
         proj_navigable_obj_feat = proj_masking(navigable_obj_img_feat, self.proj_navigable_obj_mlp1, object_mask.view(batch_size, num_heading*num_object)) # batch x 48*36 x 152 -> batch x 48*36 x 128
-        proj_navigable_feat = proj_masking(navigable_img_feat, self.proj_navigable_img_mlp, navigable_mask.repeat(1,3))
+        #proj_navigable_feat = proj_masking(navigable_img_feat, self.proj_navigable_img_mlp, navigable_mask.repeat(1,3))
         
         
         # add similarity with two methods
-        #proj_navigable_feat = proj_masking(torch.cat([navigable_img_feat, torch.sort(landmark_similarity, dim=-1)[0]],2), self.proj_navigable_img_mlp2, navigable_mask.repeat(1,3)) # batch x 48 x 128
+        proj_navigable_feat = proj_masking(torch.cat([navigable_img_feat, torch.sort(weighted_obj_rel_feat, dim=-1)[0]],2), self.proj_navigable_img_mlp2, navigable_mask.repeat(1,3)) # batch x 48 x 128
         #proj_navigable_feat = proj_masking(torch.cat([navigable_img_feat, landmark_similarity],2), self.proj_navigable_img_mlp, navigable_mask.repeat(1,3))
         # landmark_similarity: 4 x 48 x 36
         # navigable_img_feat: 4 x 48 x 2176  
@@ -627,42 +609,12 @@ class ConfiguringRelationObject(nn.Module):
             r_t = self.sm(r_t)
         
     
-        weighted_ctx, ctx_attn = self.state_attention(s_0, r_t, ctx, ctx_mask, step)  
-        '''     
-        
-        triplet_arg1 = triplet_tensor[:,:,:,0,:]
-        triplet_arg2 = triplet_tensor[:,:,:,1,:]
-        triplet_arg3 = triplet_tensor[:,:,:,2,:]
+        weighted_ctx, ctx_attn = self.state_attention(s_0, r_t, ctx, ctx_mask, step)
 
-        proj_trip_arg1 = self.triplet_arg1_fc(triplet_arg1)
-        proj_trip_arg2 = self.triplet_arg2_fc(triplet_arg2)
-        proj_trip_arg3 = self.triplet_arg3_fc(triplet_arg3)
-
-        triplet_feat = torch.cat([proj_trip_arg1, proj_trip_arg2, proj_trip_arg3], dim=-1) # batch*config_size*triplet_size,900
-        triplet_feat = torch.transpose(triplet_feat.view(batch_size,config_num,triplet_num*triplet_dim),1,2) # batch*config_size*triplet_size*900
-        triplet_feat = torch.transpose(torch.matmul(triplet_feat, ctx_attn.unsqueeze(-1)).squeeze(-1).view(batch_size,triplet_num,triplet_dim),1,2)#batch*triplet_size*900
-
-
-        obj_rel1 = candidate_obj_relation_feat[:,:,:,:,0:152]
-        obj_rel2 = candidate_obj_relation_feat[:,:,:,:,152:152+12]
-        obj_rel3 = candidate_obj_relation_feat[:,:,:,:,152+12:2*152+12]
-
-        proj_obj_rel1 = self.obj_rel_arg1(obj_rel1)
-        proj_obj_rel2 = self.obj_rel_arg2(obj_rel2)
-        proj_obj_rel3 = self.obj_rel_arg3(obj_rel3)
-        
-
-        obj_rel_feat = torch.cat([proj_obj_rel1,  proj_obj_rel2, proj_obj_rel3], dim=-1)
-        obj_rel_feat = obj_rel_feat.view(batch_size, num_heading*num_object*num_object, triplet_dim)
-        obj_rel_feat = torch.bmm(obj_rel_feat, triplet_feat).view(batch_size, num_heading, num_object*num_object*triplet_num)
-        weighted_obj_rel_feat = self.sm(torch.mean(obj_rel_feat, dim=-1))
-        '''
-        
         conf_obj_feat, conf_obj_attn = self.config_obj_attention(self.config_fc(weighted_ctx), proj_navigable_obj_feat, navigable_mask, object_mask) # 4 x 16 x 128
         weighted_conf_obj_feat, conf_obj_attn = self.soft_attn(self.h0_fc(h_0), conf_obj_feat, mask=navigable_mask.repeat(1,3)) # 4 x 128
 
-        alpha =0.5
-        new_weighted_img_feat = torch.bmm((alpha*weighted_obj_rel_feat+(1-alpha)*conf_obj_attn).unsqueeze(dim=1), self.image_linear(navigable_img_feat)).squeeze(dim=1)# batch x 128
+        new_weighted_img_feat = torch.bmm(conf_obj_attn.unsqueeze(dim=1), self.image_linear(navigable_img_feat)).squeeze(dim=1)# batch x 128
         
         #concat_input = torch.cat((proj_pre_feat, new_weighted_img_feat, weighted_ctx), 1)
         concat_input = torch.cat((new_weighted_img_feat, weighted_ctx), 1)

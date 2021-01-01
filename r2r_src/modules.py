@@ -150,14 +150,14 @@ class ConfigObjAttention(nn.Module):
         batch_size, navi_nums, object_num = object_mask.shape
         atten_weight = config_feature.unsqueeze(dim=1) # 4 x 1 x128
         atten_weight = torch.bmm(atten_weight, torch.transpose(image_feature, 1, 2)).squeeze(dim=1)# 4 x 576
-        atten_weight = atten_weight.view(batch_size, navi_nums, 36) # 4 x 16 x 36
+        atten_weight = atten_weight.view(batch_size, navi_nums, object_num) # 4 x 16 x 36
         atten_mask = atten_mask.unsqueeze(dim=2)
         tmp_atten_object_mask = atten_mask.repeat(1,3,1) * object_mask
         extened_padded_mask = ((1.0 - tmp_atten_object_mask) * -1e9)
         atten_weight = atten_weight + extened_padded_mask
         atten_weight = self.sm(atten_weight) # 4 x 16 x 36
         atten_weight = atten_weight.unsqueeze(dim=2)
-        image_feature = image_feature.view(batch_size, navi_nums, 36, 128)
+        image_feature = image_feature.view(batch_size, navi_nums, object_num, 128)
         weighted_config_img_feat = torch.matmul(atten_weight, image_feature).squeeze(dim=2) # 4 x 16 x 1 x 128
 
         return weighted_config_img_feat, atten_weight.squeeze(dim=2)

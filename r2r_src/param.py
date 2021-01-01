@@ -16,7 +16,7 @@ class Param:
         self.parser.add_argument('--maxInput', type=int, default=80, help="max input instruction")
         self.parser.add_argument('--maxDecode', type=int, default=120, help="max input instruction")
         self.parser.add_argument('--maxAction', type=int, default=20, help='Max Action sequence')
-        self.parser.add_argument('--batchSize', type=int, default=32)
+        self.parser.add_argument('--batchSize', type=int, default=16)
         self.parser.add_argument('--ignoreid', type=int, default=-100)
         self.parser.add_argument('--feature_size', type=int, default=2048)
         self.parser.add_argument("--loadOptim",action="store_const", default=False, const=True)
@@ -25,7 +25,7 @@ class Param:
         self.parser.add_argument("--speaker", default=None)
         self.parser.add_argument("--listener", default=None)
         #1. 37800
-        self.parser.add_argument("--load", type=str, default="/VL/space/zhan1624/R2R-EnvDrop/snap/agent/20201111-034645/Iter_33700")
+        self.parser.add_argument("--load", type=str, default=None)
 
         # More Paths from
         self.parser.add_argument("--aug", default=None)
@@ -46,8 +46,8 @@ class Param:
         # Submision configuration
         self.parser.add_argument("--candidates", type=int, default=1)
         self.parser.add_argument("--paramSearch", dest='param_search', action='store_const', default=False, const=True)
-        self.parser.add_argument("--submit", action='store_const', default=True, const=True)
-        self.parser.add_argument("--beam", action="store_const", default=False, const=True)
+        self.parser.add_argument("--submit", action='store_const', default=False, const=True)
+        self.parser.add_argument("--beam", action="store_const", default=True, const=True)
         self.parser.add_argument("--alpha", type=float, default=0.5)
 
         # Training Configurations
@@ -89,19 +89,23 @@ class Param:
         self.parser.add_argument("--configuration", default=True, type=bool)
         self.parser.add_argument("--candidate_length", default=15, type=int, help="without considering end situation, if you want to consider end situation, you should add one during candidate viewpoint processing")
         self.parser.add_argument("--text_dimension", default=300, type=int, help="text dimenstion")
-       
-        self.parser.add_argument("--obj_img_feat_path", default='/VL/space/zhan1624/selfmonitoring-agent/img_features/152-object_feature_new.npy', type=str)
+        #152-object_feature_new.npy
+        #152-object_feature_relation.npy
+        self.parser.add_argument("--obj_img_feat_path", default='/egr/research-hlr/joslin/Matterdata/v1/scans/img_features/152-object_feature_relation_18.npy', type=str)
         
-        self.parser.add_argument("--train_landmark_path", default='/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/component_data/landmarks/new_landmarks_feature/landmark_feature/landmark_train_feature.npy', type=str)
-        self.parser.add_argument("--val_seen_landmark_path", default='/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/component_data/landmarks/new_landmarks_feature/landmark_feature/landmark_val_seen_feature.npy', type=str)
-        self.parser.add_argument("--val_unseen_landmark_path", default='/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/component_data/landmarks/new_landmarks_feature/landmark_feature/landmark_val_unseen_feature.npy', type=str)
+        self.parser.add_argument("--train_landmark_path", default='/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components/landmarks/landmark_train_feature.npy', type=str)
+        self.parser.add_argument("--val_seen_landmark_path", default='/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components/landmarks/landmark_val_seen_feature.npy', type=str)
+        self.parser.add_argument("--val_unseen_landmark_path", default='/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components/landmarks/landmark_val_unseen_feature.npy', type=str)
         self.parser.add_argument("--test_landmark_path", default='/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/component_data/landmarks/synthetic/landmark_test.npy', type=str)
 
-        self.parser.add_argument("--train_motion_indi_path", default='/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/component_data/motion_indicator/motion_feature/motion_train.npy', type=str)
-        self.parser.add_argument("--val_seen_motion_indi_path", default='/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/component_data/motion_indicator/motion_feature/motion_val_seen.npy', type=str)
-        self.parser.add_argument("--val_unseen_motion_indi_path", default='/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/component_data/motion_indicator/motion_feature/motion_val_unseen.npy', type=str)
+        self.parser.add_argument("--train_motion_indi_path", default='/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components/motion_indicator/motion_indicator_train_feature.npy', type=str)
+        self.parser.add_argument("--val_seen_motion_indi_path", default='/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components/motion_indicator/motion_indicator_val_seen_feature.npy', type=str)
+        self.parser.add_argument("--val_unseen_motion_indi_path", default='/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components/motion_indicator/motion_indicator_val_unseen_feature.npy', type=str)
         self.parser.add_argument("--test_motion_indi_path", default='/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/component_data/motion_indicator/synthetic/motion_test.npy', type=str)
-
+        
+        self.parser.add_argument("--train_landmark_triplet", default="/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components/triplets/train_triplet.npy", type=str)
+        self.parser.add_argument("--val_seen_landmark_triplet", default="/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components/triplets/val_seen_triplet.npy", type=str)
+        self.parser.add_argument("--val_unseen_landmark_triplet", default="/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components/triplets/val_unseen_triplet.npy", type=str)
 
         # BERT Encoder
         self.parser.add_argument("--rnn_hidden_size", default=512, type=int)
@@ -131,7 +135,7 @@ args = param.args
 args.TRAIN_VOCAB = 'tasks/R2R/data/train_vocab.txt'
 args.TRAINVAL_VOCAB = 'tasks/R2R/data/trainval_vocab.txt'
 
-args.IMAGENET_FEATURES = 'img_features/ResNet-152-imagenet.tsv'
+args.IMAGENET_FEATURES = '/egr/research-hlr/joslin/Matterdata/v1/scans/ResNet-152-imagenet.tsv'
 args.CANDIDATE_FEATURES = 'img_features/ResNet-152-candidate.tsv'
 args.features_fast = 'img_features/ResNet-152-imagenet-fast.tsv'
 args.log_dir = 'snap/%s' % args.name

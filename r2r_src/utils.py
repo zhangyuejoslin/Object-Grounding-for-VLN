@@ -28,7 +28,8 @@ config = {
     'motion_indicator_file' : '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/component_data/motion_indicator/motion_dict.txt',
     'stop_words_file': '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/stop_words.txt',
     'position_file': '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/spatial_position_dic.txt',
-    'spatial_indicator_file': '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/spatial_indicator.txt'
+    'spatial_indicator_file': '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/spatial_indicator.txt',
+    'glove_path':'/egr/research-hlr/joslin/Matterdata/v1/scans/glove_embedding/glove.6B.100d.txt'
 }
 def split_oder(dictionary):
     return sorted(dictionary, key = lambda x: len(x.split()), reverse=True)
@@ -49,6 +50,13 @@ with open(config["stop_words_file"]) as f_stop_word:
     stopword = f_stop_word.read().split('\n')
     stopword = split_oder(stopword)
 
+glove_embeddings_dict = {} # 100d glove_embedding
+with open(config['glove_path'], 'r') as f:
+    for line in f:
+        values = line.split()
+        word = values[0]
+        vector = np.asarray(values[1:], "float32")
+        glove_embeddings_dict[word] = vector
 
 def read_file(file_path):
     with open(file_path) as f_dict:
@@ -111,8 +119,8 @@ def get_landmark_triplet(test_sentence):
                 for e_e_d in each_element_doc:
                     tmp_list.append(e_e_d.vector)
                 triplet_array[id][element_id] = np.mean(np.array(tmp_list), axis=0)
-        
         return triplet_array
+
     doc = nlp1(test_sentence)
     start_id = 0
     end_id = 0
@@ -150,6 +158,8 @@ def get_landmark_triplet(test_sentence):
                 start_phrase = doc[start_id:end_id]
                 flag = 0
                 while start_id < end_id:
+                    if "and" in start_phrase.text or "or" in start_phrase.text:
+                        break
                     if start_phrase.text in position_list or start_phrase.text in spatial_indicator_list or start_phrase.text in specific_token_list:
                         flag = 1
                         triplets.append([each_chunk.text, start_phrase.text, next_chunk.text])
@@ -177,7 +187,7 @@ def get_landmark_triplet(test_sentence):
                 new_triplet.append(each_tr)
 
     triplet_vector = get_vector_represent(new_triplet)
-            
+          
     return new_triplet, triplet_vector
     
 def get_landmark(each_configuration):

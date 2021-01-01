@@ -13,8 +13,9 @@ import os
 import random
 import networkx as nx
 from param import args
+from tqdm import tqdm
 
-from utils import load_datasets, load_nav_graphs, Tokenizer, get_configurations
+from utils import load_datasets, load_nav_graphs, Tokenizer, get_configurations, get_landmark_triplet, get_landmark, get_motion_indicators
 
 csv.field_size_limit(sys.maxsize)
 
@@ -95,23 +96,54 @@ class R2RBatch():
     def __init__(self, feature_store, batch_size=100, seed=10, splits=['train'], tokenizer=None,
                  name=None):
         self.env = EnvBatch(feature_store=feature_store, batch_size=batch_size)
+        self.landmark_triplet_vector = {}
+        self.landmark_triplet_mask = {}
+        self.detailed_landmark_mask = {}
+        self.landmark_triplet_dict = {}
+        self.landmark = {}
+        self.motion_indicator = {}
         if feature_store:
             self.feature_size = self.env.feature_size
         self.data = []
         if tokenizer:
             self.tok = tokenizer
         scans = []
+        config_nums = 0
+        
+        all_configuration_list = []
         for split in splits:
-            for item in load_datasets([split]):
+            for item in tqdm(load_datasets([split])):
                 # Split multiple instructions into separate entries
                 for j,instr in enumerate(item['instructions']):
+                    tmp_config = []
                     if item['scan'] not in self.env.featurized_scans:   # For fast training
                         continue
                     new_item = dict(item)
                     new_item['instr_id'] = '%s_%d' % (item['path_id'], j)
-                    
+
                     if args.configuration:
                         each_configuration_list = get_configurations(instr)
+                        tmp_config.append(new_item['instr_id'])
+                        tmp_config.append(instr)
+                        tmp_config += each_configuration_list
+                        '''
+                        for config_id, each_config in enumerate(each_configuration_list):
+                            config_nums += 1
+                            landmark_triplet, triplet_vector = get_landmark_triplet(each_config)
+                            self.landmark_triplet_vector[new_item['instr_id']+"_"+ str(config_id)] = triplet_vector
+                        
+                            if each_config == None:
+                                self.landmark[new_item['instr_id']+"_"+ str(config_id)] = [("",np.zeros(300))]
+                                self.motion_indicator[new_item['instr_id']+"_"+ str(config_id)] = np.zeros(300)
+                                #self.motion_indicator[str(item['path_id'])+"_"+ str(config_id)] = np.zeros(300)
+                            else:
+                                self.landmark[new_item['instr_id']+"_"+ str(config_id)] = get_landmark(each_config)
+                                #self.landmark_noun[new_item['instr_id']+"_"+ str(config_id)] = get_noun_chunks(each_config)[1]
+                                #self.motion_indicator[str(item['path_id'])+"_"+ str(config_id)] = get_motion_indicators(each_config)[1]
+                                self.motion_indicator[new_item['instr_id']+"_"+ str(config_id)] = get_motion_indicators(each_config)[1]
+                           
+                        '''
+                        all_configuration_list.append(tmp_config)
                         new_item['configurations'] = each_configuration_list
                         configuration_length = len(each_configuration_list)
                         tmp_str = " Quan ".join(each_configuration_list) + " Quan"
@@ -131,6 +163,21 @@ class R2RBatch():
                             self.data.append(new_item)
                             scans.append(item['scan'])
                     
+        # with open("/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components/config_split.txt",'w') as f_write:
+        #     for a_c_l in all_configuration_list:
+        #         f_write.write("\n".join(a_c_l))
+        #         f_write.write('\n')
+        #         f_write.write('\n')
+        
+        '''
+        self.landmark_triplet_dict = {}
+        self.landmark_triplet_dict['landmark_triplet_vector'] = self.landmark_triplet_vector
+        #self.landmark_triplet_dict['landmark_triplet_mask'] = self.landmark_triplet_mask
+        #self.landmark_triplet_dict['detailed_landmark_mask'] = self.detailed_landmark_mask
+        np.save("/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components/triplets/%s_triplet.npy" % splits[0], self.landmark_triplet_dict)
+        #np.save("/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components/triplets/landmark_%s_feature.npy" % splits[0], self.landmark)
+        #np.save("/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components/triplets/motion_indicator_%s_feature.npy" % splits[0], self.motion_indicator)
+        '''
 
         if name is None:
             self.name = splits[0] if len(splits) > 0 else "FAKE"

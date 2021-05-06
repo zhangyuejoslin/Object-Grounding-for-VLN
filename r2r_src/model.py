@@ -5,8 +5,23 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from param import args
 from modules import build_mlp, SoftAttention, PositionalEncoding, ScaledDotProductAttention, create_mask, create_mask_for_object, proj_masking, StateAttention, ConfigObjAttention
+#from transformers import LxmertTokenizer, LxmertModel
 
+class ObjEncoder(nn.Module):
+    ''' Encodes object labels using GloVe. '''
 
+    def __init__(self, vocab_size, embedding_size, glove_matrix):
+        super(ObjEncoder, self).__init__()
+
+        padding_idx = 100
+        word_embeds = nn.Embedding(vocab_size, embedding_size, padding_idx)
+        word_embeds.load_state_dict({'weight': glove_matrix})
+        self.embedding = word_embeds
+        self.embedding.weight.requires_grad = False
+
+    def forward(self, inputs):
+        embeds = self.embedding(inputs)
+        return embeds
 
 class EncoderLSTM(nn.Module):
     ''' Encodes navigation instructions, returning hidden state context (for
@@ -144,6 +159,8 @@ class AttnDecoderLSTM(nn.Module):
         self.feat_att_layer = SoftDotAttention(hidden_size, feature_size)
         self.attention_layer = SoftDotAttention(hidden_size, hidden_size)
         self.candidate_att_layer = SoftDotAttention(hidden_size, feature_size)
+        self.LMmodel = LxmertModel.from_pretrained('unc-nlp/lxmert-base-uncased', cache_dir='/VL/space/zhan1624/lxmert-base-uncased')
+        
 
     def forward(self, action, feature, cand_feat,
                 h_0, prev_h1, c_0,
@@ -356,8 +373,7 @@ class ConfiguringObject(nn.Module):
         self.dropout = nn.Dropout(p=rnn_dropout)
         
         self.lstm = nn.LSTMCell(img_fc_dim[-1] + rnn_hidden_size + 300 + 300 , rnn_hidden_size)
-
-        #self.lstm = nn.LSTMCell(img_fc_dim[-1] * 2 + rnn_hidden_size, rnn_hidden_size)
+        #self.lstm = nn.LSTMCell(img_fc_dim[-1] + rnn_hidden_size, rnn_hidden_size)
 
 
         self.h1_fc = nn.Linear(rnn_hidden_size, rnn_hidden_size, bias=False)
@@ -367,7 +383,7 @@ class ConfiguringObject(nn.Module):
         self.proj_out = nn.Linear(rnn_hidden_size, img_fc_dim[-1], bias=fc_bias)
 
         self.logit_fc = nn.Linear(rnn_hidden_size * 2 + 300 + 300, img_fc_dim[-1])
-        #self.logit_fc = nn.Linear(rnn_hidden_size * 2, img_fc_dim[-1])
+        #self.logit_fc = nn.Linear(rnn_hidden_size*2, img_fc_dim[-1])
 
         self.r_linear = nn.Linear(rnn_hidden_size + 128, 2)
 
@@ -382,8 +398,6 @@ class ConfiguringObject(nn.Module):
         self.sm = nn.Softmax(dim=1)
 
         self.drop_env = nn.Dropout(p=args.featdropout)
-
-
 
         self.r_transform = Variable(torch.tensor([[1,0,0.75,0.5],[0,1,0.25,0.5]]).transpose(0,1), requires_grad=False)
         self.ho_trans = nn.Linear(768, 512)
@@ -411,10 +425,6 @@ class ConfiguringObject(nn.Module):
         
         # object image feature
         navigable_obj_img_feat = navigable_obj_img_feat.view(batch_size, num_heading*num_object, 152) # 4 x 48*36 x 152
-        
-        navigable_obj_img_feat = self.drop_env(navigable_obj_img_feat)
-        navigable_img_feat[..., :-args.angle_feat_size] = self.drop_env(navigable_img_feat[..., :-args.angle_feat_size])
-
         index_length = [len(_index)+1 for _index in navigable_index]
         
         navigable_mask = create_mask(batch_size, int(num_heading/3), index_length)
@@ -494,7 +504,7 @@ class ConfiguringRelationObject(nn.Module):
        
         proj_navigable_img_kwargs2 = {
              #add 36 if add similarity
-            'input_dim': img_feat_input_dim+18,
+            'input_dim': img_feat_input_dim+36+36+1,
             'hidden_dims': img_fc_dim,
             'use_batchnorm': img_fc_use_batchnorm,
             'dropout': img_dropout,
@@ -539,11 +549,19 @@ class ConfiguringRelationObject(nn.Module):
 
         self.drop_env = nn.Dropout(p=args.featdropout)
 
-        self.obj_rel_arg2 = nn.Linear(12, 300, bias=False) # obj_relation
+        # self.triplet_arg1 = nn.Linear(300, 100, bias=False)
+        # self.triplet_arg2 = nn.Linear(300, 100, bias=False)
+        # self.triplet_arg3 = nn.Linear(300, 100, bias=False)
+
+        #self.obj_rel_arg1 = nn.Linear(152, 100, bias=False)
+        self.obj_rel_arg2 = nn.Linear(12, 100, bias=False) # obj_relation
+        #self.obj_rel_arg3 = nn.Linear(152, 100, bias=False)
+
+        self.view_arg = nn.Linear(4, 100, bias=False)
 
 
     def forward(self, navigable_img_feat, navigable_obj_feat, navigable_obj_img_feat, object_mask, pre_feat, h_0, c_0, ctx, 
-                s_0, r_t, navigable_index, ctx_mask, step, triplet_tensor, candidate_obj_relation_feat, obj_rel_arg_feat):
+                s_0, r_t, navigable_index, ctx_mask, step, triplet_tensor, candidate_obj_relation_feat, obj_rel_arg_feat, img_view_feat, view_tensor, landmark_similarity=None):
 
         """ Takes a single step in the decoder LSTM.
         config_embedding: batch x max_config_len x config embeddding
@@ -556,46 +574,47 @@ class ConfiguringRelationObject(nn.Module):
         # input of image_feature should be changed
     
         
-        batch_size, num_heading, num_object, object_feat_dim = navigable_obj_feat.size()
+        #batch_size, num_heading, num_object, obj_feat_dim = navigable_obj_feat.size()
+        batch_size, num_heading, num_object, obj_feat_dim = navigable_obj_img_feat.size()
         config_num = ctx.shape[1]
         triplet_num = triplet_tensor.shape[2]
-        triplet_dim = 300
+        view_num = view_tensor.shape[2]
+        triplet_dim = 100
+        view_dim = 100
 
         # object text feature
-        navigable_obj_feat = navigable_obj_feat.view(batch_size, num_heading*num_object, object_feat_dim) #4 x 16*36 x 300 
+        #navigable_obj_feat = navigable_obj_feat.view(batch_size, num_heading*num_object, obj_feat_dim) #4 x 16*36 x 300 
         
         # object image feature
         navigable_obj_img_feat = navigable_obj_img_feat.view(batch_size, num_heading*num_object, 152) # 4 x 48*36 x 152
         
-        navigable_obj_img_feat = self.drop_env(navigable_obj_img_feat)
-        navigable_img_feat[..., :-args.angle_feat_size] = self.drop_env(navigable_img_feat[..., :-args.angle_feat_size])
+        # navigable_obj_img_feat = self.drop_env(navigable_obj_img_feat)
+        # navigable_img_feat[..., :-args.angle_feat_size] = self.drop_env(navigable_img_feat[..., :-args.angle_feat_size])
 
         index_length = [len(_index)+1 for _index in navigable_index]
         
         navigable_mask = create_mask(batch_size, int(num_heading/3), index_length)
 
-        
+
+        # triplet_feat = torch.cat((self.triplet_arg1(triplet_tensor[:,:,:,0]), self.triplet_arg2(triplet_tensor[:,:,:,1]), self.triplet_arg3(triplet_tensor[:,:,:,2])), dim=-1).view(batch_size, -1, triplet_dim*3)
+        # tmp_obj_feat = torch.cat((self.obj_rel_arg1(obj_rel_arg_feat[:,:,:,:,:obj_feat_dim]), self.obj_rel_arg2(candidate_obj_relation_feat), self.obj_rel_arg3(obj_rel_arg_feat[:,:,:,:,obj_feat_dim:2*obj_feat_dim])), dim=-1).view(batch_size, num_heading*num_object*num_object, triplet_dim*3)
+        # weighted_obj_rel_feat = torch.mean(torch.bmm(tmp_obj_feat, triplet_feat.transpose(1,2)).view(batch_size, num_heading, num_object, num_object*config_num*triplet_num), dim=-1)
+    
+        #triplet similarity
         triplet_feat = triplet_tensor.view(batch_size, -1, triplet_dim*3)
         tmp_obj_feat = torch.cat((obj_rel_arg_feat[:,:,:,:,:300], self.obj_rel_arg2(candidate_obj_relation_feat), obj_rel_arg_feat[:,:,:,:,300:2*300]), dim=-1).view(batch_size, num_heading*num_object*num_object, triplet_dim*3)
-        weighted_obj_rel_feat = torch.mean(torch.bmm(tmp_obj_feat, triplet_feat.transpose(1,2)).view(batch_size, num_heading, num_object, num_object*config_num*triplet_num), dim=-1)
-        '''
-        obj_rel2 = candidate_obj_relation_feat[:,:,:,:,300:300+12].cuda()
-        obj_rel_arg2 = self.obj_rel_arg2(obj_rel2)
-        tmp_obj_feat = torch.zeros(batch_size, num_heading, num_object, num_object, triplet_dim*3).cuda()
-        tmp_obj_feat[:,:,:,:,0:triplet_dim] = candidate_obj_relation_feat[:,:,:,:,0:triplet_dim]
-        tmp_obj_feat[:,:,:,:,1*triplet_dim:2*triplet_dim] = obj_rel_arg2
-        tmp_obj_feat[:,:,:,:,2*triplet_dim:3*triplet_dim] =candidate_obj_relation_feat[:,:,:,:,triplet_dim+12:3*triplet_dim]
-        tmp_obj_feat = tmp_obj_feat.view(batch_size, num_heading*num_object*num_object, triplet_dim*3)
-        #weighted_obj_rel_feat = torch.mean((torch.bmm(tmp_obj_feat, triplet_feat.transpose(1,2))*s_0.view(batch_size,1, config_num,1))).view(batch_size, num_heading, num_object, num_object*config_num*triplet_num), dim=-1)
-        weighted_obj_rel_feat = torch.mean(torch.bmm(tmp_obj_feat, triplet_feat.transpose(1,2)).view(batch_size, num_heading, num_object, num_object*config_num*triplet_num), dim=-1)
-        '''
+        obj_rel_sim = torch.mean(torch.bmm(tmp_obj_feat, triplet_feat.transpose(1,2)).view(batch_size, num_heading, num_object, num_object*config_num*triplet_num), dim=-1)
+
+        #view similarity
+        view_feat = view_tensor.view(batch_size, -1, view_dim)
+        view_sim = torch.mean(torch.bmm(self.view_arg(img_view_feat), view_feat.transpose(1,2)).view(batch_size, int(num_heading/3), config_num*view_num), dim=-1).repeat(1,3)
+
         # not add similarity
         proj_navigable_obj_feat = proj_masking(navigable_obj_img_feat, self.proj_navigable_obj_mlp1, object_mask.view(batch_size, num_heading*num_object)) # batch x 48*36 x 152 -> batch x 48*36 x 128
         #proj_navigable_feat = proj_masking(navigable_img_feat, self.proj_navigable_img_mlp, navigable_mask.repeat(1,3))
         
-        
         # add similarity with two methods
-        proj_navigable_feat = proj_masking(torch.cat([navigable_img_feat, torch.sort(weighted_obj_rel_feat, dim=-1)[0]],2), self.proj_navigable_img_mlp2, navigable_mask.repeat(1,3)) # batch x 48 x 128
+        proj_navigable_feat = proj_masking(torch.cat([navigable_img_feat, landmark_similarity, torch.sort(obj_rel_sim, dim=-1)[0], torch.sort(view_sim.unsqueeze(-1), dim=-1)[0]],2),  self.proj_navigable_img_mlp2, navigable_mask.repeat(1,3)) # batch x 48 x 128
         #proj_navigable_feat = proj_masking(torch.cat([navigable_img_feat, landmark_similarity],2), self.proj_navigable_img_mlp, navigable_mask.repeat(1,3))
         # landmark_similarity: 4 x 48 x 36
         # navigable_img_feat: 4 x 48 x 2176  
@@ -628,3 +647,231 @@ class ConfiguringRelationObject(nn.Module):
         logit = logit[:,0:int(num_heading/3)] + logit[:,int(num_heading/3):2*int(num_heading/3)] + logit[:,2*int(num_heading/3):num_heading]
     
         return h_1, c_1, ctx_attn, logit
+
+
+class ConfigurationDecoder(nn.Module):
+    def __init__(self, embedding_size, hidden_size,
+                    dropout_ratio, feature_size=2048+4):
+        super(ConfigurationDecoder, self).__init__()
+        self.embedding_size = embedding_size
+        self.feature_size = feature_size
+        self.hidden_size = hidden_size
+        self.embedding = nn.Sequential(
+            nn.Linear(args.angle_feat_size, self.embedding_size),
+            nn.Tanh()
+        )
+        self.drop = nn.Dropout(p=dropout_ratio)
+        self.drop_env = nn.Dropout(p=args.featdropout)
+        self.lstm = nn.LSTMCell(embedding_size+feature_size, hidden_size)
+        self.feat_att_layer = SoftDotAttention(hidden_size, feature_size)
+        self.attention_layer = SoftDotAttention(hidden_size, hidden_size)
+        self.candidate_att_layer = SoftDotAttention(hidden_size, feature_size)
+        self.similarity_att_layer = SoftDotAttention(hidden_size, hidden_size)
+        self.object_att_layer = SoftDotAttention(hidden_size, hidden_size)
+        self.state_attention = StateAttention()
+        self.r_linear = nn.Linear(self.hidden_size, 2)
+        self.sm = nn.Softmax(dim=-1)
+
+        self.weight_linear = nn.Linear(2, 1)
+        self.config_obj_attention = ConfigObjAttention()
+        self.proj_object = nn.Linear(152, hidden_size)
+        self.object_text_linear = nn.Linear(300,2048)
+        self.text_relation_linear = nn.Linear(300,300)
+        self.obj_relation_linear = nn.Linear(12,300)
+
+        self.view_img_linear = nn.Linear(4, 300)
+        self.view_text_linear = nn.Linear(300,300)
+
+
+    def forward(self, action, feature, cand_feat,
+                h_0, prev_h1, c_0,
+                ctx, step, s_0, r_t, ctx_mask, landmark_object_feature = None, candidate_obj_img_feat = None, candidate_obj_text_feat = None, landmark_mask=None,
+                landmark_triplet_feature=None, obj_rel_arg_feat=None, candidat_relation=None,
+                view_img_feat=None, view_feature=None, view_object_similarity=None, view_mask=None,
+                already_dropfeat=False):
+        '''
+        Takes a single step in the decoder LSTM (allowing sampling).
+        action: batch x angle_feat_size
+        feature: batch x 36 x (feature_size + angle_feat_size)
+        cand_feat: batch x cand x (feature_size + angle_feat_size)
+        h_0: batch x hidden_size
+        prev_h1: batch x hidden_size
+        c_0: batch x hidden_size
+        ctx: batch x seq_len x dim
+        ctx_mask: batch x seq_len - indices to be masked
+        already_dropfeat: used in EnvDrop
+        '''
+
+        #object text similarity
+  
+        batch_size, image_num, object_num, obj_feat_dim = candidate_obj_text_feat.shape
+        max_config_num = ctx.shape[1]
+        landmark_similarity = torch.matmul(candidate_obj_text_feat, torch.transpose(landmark_object_feature.view(batch_size, -1, 300).unsqueeze(1),3,2))# (4*48*36*300) * (4*1*300*180）-> 4 * 48 * 36*180
+        landmark_similarity = torch.max(landmark_similarity.view(batch_size, image_num, object_num, max_config_num, -1),dim=-1)[0]# 4 * 48 * 36 * 15 * 12
+       
+        #object image similarity
+        '''
+        batch_size, image_num, object_num, obj_feat_dim = candidate_obj_text_feat.shape
+        max_config_num = ctx.shape[1]
+        landmark_similarity = torch.matmul(candidate_obj_img_feat, torch.transpose(self.object_text_linear(landmark_object_feature).view(batch_size, -1, 2048).unsqueeze(1),3,2))# (4*48*36*300) * (4*1*300*180）-> 4 * 48 * 36*180
+        landmark_similarity = torch.max(landmark_similarity.view(batch_size, image_num, object_num, max_config_num, -1),dim=-1)[0]# 4 * 48 * 36 * 15 * 12
+        '''
+        action_embeds = self.embedding(action)
+    
+        # Adding Dropout
+        action_embeds = self.drop(action_embeds)
+
+        config_num = ctx.shape[1]
+        if not already_dropfeat:
+            # Dropout the raw feature as a common regularization
+            feature[..., :-args.angle_feat_size] = self.drop_env(feature[..., :-args.angle_feat_size])   # Do not drop the last args.angle_feat_size (position feat)
+
+        prev_h1_drop = self.drop(prev_h1)
+        attn_feat, _ = self.feat_att_layer(prev_h1_drop, feature, output_tilde=False)
+
+        concat_input = torch.cat((action_embeds, attn_feat), 1) # (batch, embedding_size+feature_size)
+        h_1, c_1 = self.lstm(concat_input, (prev_h1, c_0))
+
+        h_1_drop = self.drop(h_1)
+
+        # if r_t is None:
+        #     r_t = self.r_linear(h_1_drop)
+        #     r_t = self.sm(r_t)
+        
+        # h_tilde, ctx_attn = self.state_attention(s_0, r_t, ctx, ctx_mask, step)
+        h_tilde, ctx_attn = self.attention_layer(h_1_drop, ctx, ctx_mask)
+
+        # Adding Dropout
+        h_tilde_drop = self.drop(h_tilde)
+        
+        if not already_dropfeat:
+            cand_feat[..., :-args.angle_feat_size] = self.drop_env(cand_feat[..., :-args.angle_feat_size])
+        '''
+        if landmark_similarity is not None:
+            # object relation similarity
+            arg_sim1 = torch.matmul(obj_rel_arg_feat[:,:,:,:,:300], torch.transpose(landmark_triplet_feature[:,:,:,0].view(batch_size,1,1,-1,300),3,4))
+            arg_sim2 = torch.matmul(obj_rel_arg_feat[:,:,:,:,300:], torch.transpose(landmark_triplet_feature[:,:,:,2].view(batch_size,1,1,-1,300),3,4))
+            text_relation = self.text_relation_linear(landmark_triplet_feature[:,:,:,1])
+            obj_relation = self.obj_relation_linear(candidat_relation)
+            arg_sim3 = torch.matmul(obj_relation, torch.transpose(text_relation.view(batch_size,1,1,-1,300),3,4))
+            arg_mean = torch.mean(torch.stack([arg_sim1, arg_sim2, arg_sim3], dim=-1), dim=-1)
+            arg_mean = torch.mean(arg_mean.view(batch_size, image_num, 36,36, config_num,-1),dim=-1)
+            weighted_arg_mean = torch.matmul(arg_mean, torch.transpose(ctx_attn.reshape(ctx_attn.shape[0],1,1,1,ctx_attn.shape[1]),4,3)).squeeze(-1)
+            weighted_arg_mean = torch.mean(weighted_arg_mean.view(batch_size,image_num,-1), dim=-1)
+            # object similarity
+            weighted_landmark_similarity = torch.max(torch.matmul(landmark_similarity, torch.transpose(ctx_attn.reshape(ctx_attn.shape[0],1,1,ctx_attn.shape[1]),3,2)).squeeze(-1),dim=-1)
+            
+            # view similarity
+            view_arg_sim1 = torch.mean(torch.mean(view_object_similarity, dim=-1),dim=2)
+            view_arg_sim2 = torch.mean(torch.matmul(self.view_img_linear(view_img_feat), torch.transpose(self.view_text_linear(view_feature)[:,:,:,2].view(batch_size,-1,300),2,1)).view(batch_size,image_num,config_num,-1), dim=-1)
+        
+            weighted_view_sim = torch.matmul(torch.mean(torch.stack([view_arg_sim1, view_arg_sim2], dim=2),dim=2), torch.transpose(ctx_attn.reshape(ctx_attn.shape[0],1,ctx_attn.shape[1]),2,1)).squeeze(-1)
+            
+        
+
+            
+            #_, logit1 = self.similarity_att_layer(h_tilde_drop, self.similarity_linear(weighted_landmark_similarity), output_prob=False)
+        '''
+        if view_object_similarity is not None:
+            view_arg_sim1 = torch.max(torch.mean(view_object_similarity, dim=-1),dim=2)[0]
+            view_arg_sim2 = torch.max(torch.matmul(self.view_img_linear(view_img_feat), torch.transpose(self.view_text_linear(view_feature)[:,:,:,2].view(batch_size,-1,300),2,1)).view(batch_size,image_num,config_num,-1), dim=-1)[0]
+            weighted_view_sim = torch.matmul(torch.mean(torch.stack([view_arg_sim1, view_arg_sim2], dim=2),dim=2), torch.transpose(ctx_attn.reshape(ctx_attn.shape[0],1,ctx_attn.shape[1]),2,1)).squeeze(-1)
+            logit_view = weighted_view_sim*weighted_view_sim 
+
+        weighted_landmark_similarity = torch.mean(torch.matmul(landmark_similarity, torch.transpose(ctx_attn.reshape(ctx_attn.shape[0],1,1,ctx_attn.shape[1]),3,2)).squeeze(-1), dim=-1)
+        #logit_sim = weighted_landmark_similarity*landmark_mask.unsqueeze(1)
+
+        _, logit_original = self.candidate_att_layer(h_tilde_drop, cand_feat, output_prob=False)
+        logit = self.weight_linear(torch.stack([weighted_landmark_similarity, logit_original],dim=-1)).squeeze(-1)
+
+        #logit = torch.mean(torch.stack([self.sm(weighted_landmark_similarity), logit_original],dim=1), dim=1)
+        
+        #logit = logit_original
+        
+        '''
+        logit = torch.zeros(batch_size, image_num).cuda()
+
+        if view_object_similarity is not None:
+            tmp_logit_original = torch.mean(torch.stack([logit_sim, logit_original],dim=1), dim=1)
+            logit_sim = torch.mean(torch.stack([logit_sim, logit_original, logit_view],dim=1), dim=1)
+            logit[torch.where(view_mask == 0)] = tmp_logit_original[torch.where(view_mask == 0)]
+            logit[torch.where(view_mask == 1)] = logit_sim[torch.where(view_mask == 1)]
+
+        
+        else:
+            logit_sim = torch.mean(torch.stack([logit_sim, logit_original],dim=1), dim=1)
+            logit[torch.where(landmark_mask == 0)] = logit_original[torch.where(landmark_mask == 0)]
+            logit[torch.where(landmark_mask == 1)] = logit_sim[torch.where(landmark_mask == 1)]
+        
+        '''
+        
+
+        return h_1, c_1, logit, h_tilde, ctx_attn
+
+
+
+
+class ConfigurationLXMERTDecoder(nn.Module):
+    def __init__(self, embedding_size, hidden_size,
+                    dropout_ratio, feature_size=2048+4):
+        super(ConfigurationLXMERTDecoder, self).__init__()
+        self.embedding_size = embedding_size
+        self.feature_size = feature_size
+        self.hidden_size = hidden_size
+        self.embedding = nn.Sequential(
+            nn.Linear(args.angle_feat_size, self.embedding_size),
+            nn.Tanh()
+        )
+        self.drop = nn.Dropout(p=dropout_ratio)
+        self.drop_env = nn.Dropout(p=args.featdropout)
+        self.lstm = nn.LSTMCell(embedding_size+feature_size, hidden_size)
+        self.feat_att_layer = SoftDotAttention(hidden_size, feature_size)
+        self.attention_layer = SoftDotAttention(hidden_size, hidden_size)
+        self.candidate_att_layer = SoftDotAttention(hidden_size, feature_size)
+        self.model = LxmertModel.from_pretrained('unc-nlp/lxmert-base-uncased', cache_dir='/VL/space/zhan1624/lxmert-base-uncased')
+        self.outputnn = nn.Linear(self.hidden_size, 1)
+
+    def forward(self, action, feature, cand_feat,
+                h_0, prev_h1, c_0,
+                ctx, visual_feature, visual_pos_feature, ctx_mask=None,
+                already_dropfeat=False):
+        '''
+        Takes a single step in the decoder LSTM (allowing sampling).
+        action: batch x angle_feat_size
+        feature: batch x 36 x (feature_size + angle_feat_size)
+        cand_feat: batch x cand x (feature_size + angle_feat_size)
+        h_0: batch x hidden_size
+        prev_h1: batch x hidden_size
+        c_0: batch x hidden_size
+        ctx: batch x seq_len x dim
+        ctx_mask: batch x seq_len - indices to be masked
+        already_dropfeat: used in EnvDrop
+        '''
+        action_embeds = self.embedding(action)
+        batch_size, vocab_num, vocab_dim = ctx.shape
+        img_num = cand_feat.shape[1]
+
+        # Adding Dropout
+        action_embeds = self.drop(action_embeds)
+
+        if not already_dropfeat:
+            # Dropout the raw feature as a common regularization
+            feature[..., :-args.angle_feat_size] = self.drop_env(feature[..., :-args.angle_feat_size])   # Do not drop the last args.angle_feat_size (position feat)
+
+        prev_h1_drop = self.drop(prev_h1)
+        attn_feat, _ = self.feat_att_layer(prev_h1_drop, feature, output_tilde=False)
+
+        concat_input = torch.cat((action_embeds, attn_feat), 1) # (batch, embedding_size+feature_size)
+        h_1, c_1 = self.lstm(concat_input, (prev_h1, c_0))
+
+        h_1_drop = self.drop(h_1)
+        h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
+        ctx = ctx.unsqueeze(1).repeat(1,img_num,1,1).view(-1,vocab_num, vocab_dim)
+        outputs = self.model(inputs_embeds=ctx,visual_feats=visual_feature.view(-1,36,2048), visual_pos=visual_pos_feature.view(-1,36,4),return_dict=True)
+        # Adding Dropout
+        
+        logit = self.outputnn(outputs[2].view(batch_size, img_num, self.hidden_size)).squeeze(-1)
+       
+
+
+        return h_1, c_1, logit, h_tilde

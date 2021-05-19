@@ -15,7 +15,7 @@ import networkx as nx
 from param import args
 from tqdm import tqdm
 
-from utils import load_datasets, load_nav_graphs, Tokenizer, get_configurations, get_landmark_triplet, get_landmark, get_motion_indicators
+from utils import load_datasets, load_nav_graphs, Tokenizer, get_configurations, get_motion_indicator, get_landmark
 
 csv.field_size_limit(sys.maxsize)
 
@@ -93,96 +93,89 @@ class EnvBatch():
 class R2RBatch():
     ''' Implements the Room to Room navigation task, using discretized viewpoints and pretrained features '''
 
-    def __init__(self, feature_store, batch_size=100, seed=10, splits=['train'], tokenizer=None,
+    def __init__(self, feature_store, pano_caffee=None, batch_size=100, seed=10, splits=['train'], tokenizer=None,
                  name=None):
         self.env = EnvBatch(feature_store=feature_store, batch_size=batch_size)
-        self.landmark_triplet_vector = {}
-        self.landmark_triplet_mask = {}
-        self.detailed_landmark_mask = {}
-        self.landmark_triplet_dict = {}
-        self.landmark = {}
-        self.motion_indicator = {}
         if feature_store:
             self.feature_size = self.env.feature_size
         self.data = []
+        self.motion_indicator = {}
+        self.landmark = {}
+        self.configs = {}
+
+       
+        if name:
+            config_aug = np.load("/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components1/aug/configs_aug.npy", allow_pickle=True).item()
+            self.configs.update(config_aug)
+   
+        else:
+            configs = np.load(args.configpath+"configs_"+splits[0]+".npy", allow_pickle=True).item()
+            self.configs.update(configs)
+   
+       
         if tokenizer:
             self.tok = tokenizer
         scans = []
-        config_nums = 0
-        
-        all_configuration_list = []
-        for split in splits:
-            for item in tqdm(load_datasets([split])):
-                # Split multiple instructions into separate entries
-                for j,instr in enumerate(item['instructions']):
-                    tmp_config = []
-                    if item['scan'] not in self.env.featurized_scans:   # For fast training
-                        continue
-                    new_item = dict(item)
-                    new_item['instr_id'] = '%s_%d' % (item['path_id'], j)
+        for item in tqdm(load_datasets(splits)):
+            # Split multiple instructions into separate entries
+            for j,instr in enumerate(item['instructions']):
+                if item['scan'] not in self.env.featurized_scans:   # For fast training
+                    continue
+                new_item = dict(item)
+                new_item['instr_id'] = '%s_%d' % (item['path_id'], j)
+                #new_item['instr_id'] = str(item['path_id'])
+                if args.configuration:
+                    each_configuration_list = self.configs[str(new_item['instr_id'])]
+                    # instr = "Exit closet, and walk past bed. Walk out open bedroom door, and wait at top of stair landing. "
+                    # each_configuration_list = get_configurations(instr)
+                    # self.configs[str(new_item['instr_id'])] = each_configuration_list
 
-                    if args.configuration:
-                        each_configuration_list = get_configurations(instr)
-                        tmp_config.append(new_item['instr_id'])
-                        tmp_config.append(instr)
-                        tmp_config += each_configuration_list
-                        '''
-                        for config_id, each_config in enumerate(each_configuration_list):
-                            config_nums += 1
-                            landmark_triplet, triplet_vector = get_landmark_triplet(each_config)
-                            self.landmark_triplet_vector[new_item['instr_id']+"_"+ str(config_id)] = triplet_vector
-                        
-                            if each_config == None:
-                                self.landmark[new_item['instr_id']+"_"+ str(config_id)] = [("",np.zeros(300))]
-                                self.motion_indicator[new_item['instr_id']+"_"+ str(config_id)] = np.zeros(300)
-                                #self.motion_indicator[str(item['path_id'])+"_"+ str(config_id)] = np.zeros(300)
-                            else:
-                                self.landmark[new_item['instr_id']+"_"+ str(config_id)] = get_landmark(each_config)
-                                #self.landmark_noun[new_item['instr_id']+"_"+ str(config_id)] = get_noun_chunks(each_config)[1]
-                                #self.motion_indicator[str(item['path_id'])+"_"+ str(config_id)] = get_motion_indicators(each_config)[1]
-                                self.motion_indicator[new_item['instr_id']+"_"+ str(config_id)] = get_motion_indicators(each_config)[1]
-                           
-                        '''
-                        all_configuration_list.append(tmp_config)
-                        new_item['configurations'] = each_configuration_list
-                        configuration_length = len(each_configuration_list)
-                        tmp_str = " Quan ".join(each_configuration_list) + " Quan"
-                        new_item['instructions'] = tmp_str
-                        if configuration_length:
-                            scans.append(item['scan'])
-                            self.data.append((len(new_item['configurations']), new_item))    
-                        if tokenizer:
-                            if 'instr_encoding' not in item:  # we may already include 'instr_encoding' when generating synthetic instructions       
-                                new_item['instr_encoding'] = tokenizer.encode_sentence(tmp_str)
+                    '''
+                    for config_id, each_c in enumerate(each_configuration_list):
+                        self.motion_indicator[str(new_item['instr_id']) + "_" + str(config_id)] = get_motion_indicator(each_c)
+                        self.landmark[str(new_item['instr_id']) + "_" + str(config_id)] = get_landmark(each_c, whether_root=True)
+                    '''
 
-                    else:
-                        new_item['instructions'] = str
-                        if tokenizer:
-                            new_item['instr_encoding'] = tokenizer.encode_sentence(instr)
-                        if not tokenizer or new_item['instr_encoding'] is not None:  # Filter the wrong data
-                            self.data.append(new_item)
-                            scans.append(item['scan'])
-                    
-        # with open("/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components/config_split.txt",'w') as f_write:
-        #     for a_c_l in all_configuration_list:
-        #         f_write.write("\n".join(a_c_l))
-        #         f_write.write('\n')
-        #         f_write.write('\n')
-        
+                    '''
+                    for config_id, each_c in enumerate(each_configuration_list):
+                        self.motion_indicator[str(item['path_id']) + "_" + str(config_id)] = get_motion_indicator(each_c)
+                        self.landmark[str(item['path_id']) + "_" + str(config_id)] = get_landmark(each_c)
+                    '''
+                    new_item['configurations'] = each_configuration_list
+                    configuration_length = len(each_configuration_list)
+                    tmp_str = " Quan ".join(each_configuration_list) + " Quan"
+                    new_item['instructions'] = tmp_str
+                    if configuration_length:
+                        scans.append(item['scan'])
+                        self.data.append((len(new_item['configurations']), new_item)) 
+
+                    if tokenizer:
+                        if 'instr_encoding' not in item:  # we may already include 'instr_encoding' when generating synthetic instructions       
+                            new_item['instr_encoding'] = tokenizer.encode_sentence(tmp_str)
+
+                else:
+                    new_item['instructions'] = instr
+                    if tokenizer:
+                        new_item['instr_encoding'] = tokenizer.encode_sentence(instr)
+                    if not tokenizer or new_item['instr_encoding'] is not None:  # Filter the wrong data
+                        self.data.append(new_item)
         '''
-        self.landmark_triplet_dict = {}
-        self.landmark_triplet_dict['landmark_triplet_vector'] = self.landmark_triplet_vector
-        #self.landmark_triplet_dict['landmark_triplet_mask'] = self.landmark_triplet_mask
-        #self.landmark_triplet_dict['detailed_landmark_mask'] = self.detailed_landmark_mask
-        np.save("/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components/triplets/%s_triplet.npy" % splits[0], self.landmark_triplet_dict)
-        #np.save("/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components/triplets/landmark_%s_feature.npy" % splits[0], self.landmark)
-        #np.save("/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components/triplets/motion_indicator_%s_feature.npy" % splits[0], self.motion_indicator)
+        if name:
+            np.save(f"/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components1/aug/configs_aug.npy", self.configs)
+            np.save(f"/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components1/aug/motion_indicator_aug.npy", self.motion_indicator)
+            np.save(f"/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components1/aug/landmark_aug.npy", self.landmark)
+     
         '''
-
+        '''
+        np.save(f"/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components2/configs/configs_{splits[0]}.npy", self.configs)
+        np.save(f"/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components2/motion_indicator/motion_indicator_{splits[0]}.npy", self.motion_indicator)
+        np.save(f"/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components2/landmarks/landmark_{splits[0]}.npy", self.landmark)
+        '''
         if name is None:
             self.name = splits[0] if len(splits) > 0 else "FAKE"
         else:
             self.name = name
+        self.pano_caffee = pano_caffee
 
         self.scans = set(scans)
         self.splits = splits
@@ -194,7 +187,7 @@ class R2RBatch():
             self.seed = seed
             random.seed(self.seed)
             random.shuffle(self.data)
-
+        
         self.ix = 0
         self.batch_size = batch_size
         self._load_nav_graphs()
@@ -270,6 +263,28 @@ class R2RBatch():
     def make_candidate(self, feature, scanId, viewpointId, viewId):
         def _loc_distance(loc):
             return np.sqrt(loc.rel_heading ** 2 + loc.rel_elevation ** 2)
+        def get_relative_position(loc_heading, base_heading):
+            left, right, front, back = 0, 0, 0, 0
+            if abs(loc_heading) >=  math.pi/180*180:
+                if loc_heading > 0:
+                    loc_heading = loc_heading - math.pi/180*360      
+                else:
+                    loc_heading = loc_heading + math.pi/180*360
+
+            if loc_heading < 0:
+                left = 1
+                if loc_heading > -math.pi/180 * 90:
+                    front = 1
+                else: 
+                    back = 1
+            else:
+                right = 1
+                if loc_heading < math.pi/180 * 90:
+                    front = 1
+                else:
+                    back = 1
+            return [left, right, front, back]
+        
         base_heading = (viewId % 12) * math.radians(30)
         adj_dict = {}
         long_id = "%s_%s" % (scanId, viewpointId)
@@ -296,10 +311,12 @@ class R2RBatch():
                     # if a loc is visible from multiple view, use the closest
                     # view (in angular distance) as its representation
                     distance = _loc_distance(loc)
-
+                
                     # Heading and elevation for for the loc
                     loc_heading = heading + loc.rel_heading
                     loc_elevation = elevation + loc.rel_elevation
+
+                    relative_position = get_relative_position(loc_heading, base_heading)
                     angle_feat = utils.angle_feature(loc_heading, loc_elevation)
                     if (loc.viewpointId not in adj_dict or
                             distance < adj_dict[loc.viewpointId]['distance']):
@@ -312,7 +329,8 @@ class R2RBatch():
                             'pointId': ix,
                             'distance': distance,
                             'idx': j + 1,
-                            'feature': np.concatenate((visual_feat, angle_feat), -1)
+                            'feature': np.concatenate((visual_feat, angle_feat), -1),
+                            'relative_position': relative_position
                         }
             candidate = list(adj_dict.values())
             self.buffered_state_dict[long_id] = [
@@ -333,11 +351,27 @@ class R2RBatch():
                 visual_feat = feature[ix]
                 loc_heading = normalized_heading - base_heading
                 c_new['heading'] = loc_heading
+                relative_position_new = get_relative_position(loc_heading, base_heading)
                 angle_feat = utils.angle_feature(c_new['heading'], c_new['elevation'])
                 c_new['feature'] = np.concatenate((visual_feat, angle_feat), -1)
-                c_new.pop('normalized_heading')
+                c_new['relative_position'] = relative_position_new
+                #c_new.pop('normalized_heading')
                 candidate_new.append(c_new)
             return candidate_new
+    def process_obj_feat(self, obj_data, top_N_obj):
+        obj_label = obj_data['object_class']
+        obj_label = np.array(obj_label[:top_N_obj])
+
+        return obj_label
+    def object_feats(self, obj_pkl, candidate, top_N_obj, statepoint=None):
+        cand_obj_list = []
+        for j, cand in enumerate(candidate):
+            if args.test_obj:
+                print('ERROR')
+            else:
+                obj_label = self.process_obj_feat(obj_pkl[cand['scanId']][statepoint][cand['pointId']], top_N_obj)
+            cand_obj_list.append((obj_label))
+        return cand_obj_list
 
     def _get_obs(self):
         obs = []
@@ -347,7 +381,11 @@ class R2RBatch():
 
             # Full features
             candidate = self.make_candidate(feature, state.scanId, state.location.viewpointId, state.viewIndex)
-
+            top_N_obj = 36
+            # if args.test_obj:
+            #     print("ERROR")
+            # else:
+            #     cand_obj_list = self.object_feats(self.pano_caffee, candidate, top_N_obj, state.location.viewpointId)
             # (visual_feature, angel_feature) for views
             feature = np.concatenate((feature, self.angle_feature[base_view_id]), -1)
             obs.append({
@@ -358,6 +396,7 @@ class R2RBatch():
                 'heading' : state.heading,
                 'elevation' : state.elevation,
                 'feature' : feature,
+                #'cand_objects': cand_obj_list,
                 'candidate': candidate,
                 'navigableLocations' : state.navigableLocations,
                 'configurations': item['configurations'],

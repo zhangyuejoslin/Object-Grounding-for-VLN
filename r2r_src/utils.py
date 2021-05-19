@@ -4,7 +4,6 @@ import os
 import sys
 import re
 from itertools import chain
-import spacy
 
 
 sys.path.append('build')
@@ -18,18 +17,26 @@ from collections import Counter, defaultdict
 import numpy as np
 import networkx as nx
 from param import args
-nlp1 = spacy.load("en_core_web_lg")
+import en_core_web_lg
+import pickle
+import bcolz
+
+nlp = en_core_web_lg.load()
 
 # padding, unknown word, end of sentence
 base_vocab = ['<PAD>', '<UNK>', '<EOS>']
 padding_idx = base_vocab.index('<PAD>')
+# config = {
+#     'split_file' : 'tasks/R2R/dictionaries/split_dictionary.txt',
+#     'motion_indicator_file' : 'tasks/R2R-pano/data/data/component_data/motion_indicator/motion_dict.txt',
+#     'stop_words_file': 'tasks/R2R/dictionaries/stop_words.txt',
+#     'position_file': 'tasks/R2R-pano/data/data/spatial_position_dic.txt'
+# }
 config = {
-    'split_file' : '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/split_dictionary.txt',
-    'motion_indicator_file' : '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/component_data/motion_indicator/motion_dict.txt',
+    'split_file' : '/VL/space/zhan1624/R2R-EnvDrop/tasks/R2R/dictionaries/split_dictionary.txt',
+    'motion_indicator_file' : '/VL/space/zhan1624/R2R-EnvDrop/tasks/R2R/dictionaries/motion_dict.txt',
     'stop_words_file': '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/stop_words.txt',
-    'position_file': '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/spatial_position_dic.txt',
-    'spatial_indicator_file': '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/spatial_indicator.txt',
-    'glove_path':'/egr/research-hlr/joslin/Matterdata/v1/scans/glove_embedding/glove.6B.100d.txt'
+    'position_file': '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/spatial_position_dic.txt'
 }
 def split_oder(dictionary):
     return sorted(dictionary, key = lambda x: len(x.split()), reverse=True)
@@ -41,39 +48,15 @@ with open(config['split_file']) as f_dict:
     dictionary = dictionary + tmp_dict
     dictionary = [" "+each_phrase.strip()+" " for each_phrase in dictionary]
 
-with open(config['motion_indicator_file']) as f_dict:
-    motion_dict = f_dict.read().split('\n')
-    motion_dict = [each_motion.strip() for each_motion in motion_dict]
-    motion_dict = split_oder(motion_dict)
-
 with open(config["stop_words_file"]) as f_stop_word:
     stopword = f_stop_word.read().split('\n')
     stopword = split_oder(stopword)
 
-glove_embeddings_dict = {} # 100d glove_embedding
-with open(config['glove_path'], 'r') as f:
-    for line in f:
-        values = line.split()
-        word = values[0]
-        vector = np.asarray(values[1:], "float32")
-        glove_embeddings_dict[word] = vector
-
-def read_file(file_path):
-    with open(file_path) as f_dict:
-        read_list = f_dict.read().split('\n')
-        read_list = [each.strip() for each in read_list]
-        read_list = split_oder(read_list)
-    return read_list
-position_list = read_file(config['position_file'])  
-spatial_indicator_list = read_file(config['spatial_indicator_file'])
-
 # later for motion indicator and landmarks
-
-# with open(config['motion_indicator_file']) as f_dict:
-#     motion_dict = f_dict.read().split('\n')
-#     motion_dict = [each_motion.strip() for each_motion in motion_dict]
-#     motion_dict = split_oder(motion_dict)
-
+with open(config['motion_indicator_file']) as f_dict:
+    motion_dict = f_dict.read().split('\n')
+    motion_dict = [each_motion.strip() for each_motion in motion_dict]
+    motion_dict = split_oder(motion_dict)
 
 def load_nav_graphs(scans):
     ''' Load connectivity graph for each scan '''
@@ -83,7 +66,7 @@ def load_nav_graphs(scans):
         return ((pose1['pose'][3]-pose2['pose'][3])**2\
           + (pose1['pose'][7]-pose2['pose'][7])**2\
           + (pose1['pose'][11]-pose2['pose'][11])**2)**0.5
-
+    
     graphs = {}
     for scan in scans:
         with open('connectivity/%s_connectivity.json' % scan) as f:
@@ -102,141 +85,9 @@ def load_nav_graphs(scans):
             graphs[scan] = G
     return graphs
 
-def get_landmark_triplet(test_sentence):
-    def get_vector_represent(triplets):
-        triplet_num = len(triplets)
-        triplet_array = np.zeros((triplet_num,3,300))
-        for id, each_triplet in enumerate(triplets):
-            assert len(each_triplet) <= 3
-            if id > 4:
-                break
-            for element_id, each_element in enumerate(each_triplet):
-                tmp_list = []
-                if not each_element:
-                    triplet_array[id][element_id] = np.zeros(300)
-                    continue
-                each_element_doc = nlp1(each_element)
-                for e_e_d in each_element_doc:
-                    tmp_list.append(e_e_d.vector)
-                triplet_array[id][element_id] = np.mean(np.array(tmp_list), axis=0)
-        return triplet_array
-
-    doc = nlp1(test_sentence)
-    start_id = 0
-    end_id = 0
-    landmark_stopwords = ['right', 'left','front','them', 'you','end','top', 'bottom','it','middle','side']
-    specific_token_list = ['of']
-    triplets = []
-    flag = 0
-    if test_sentence in motion_dict:
-        landmark_triplet = []
-        triplet_vector= np.zeros((1,3,300))
-        return landmark_triplet, triplet_vector
-    else:
-        #check whether two landmarks could be combined together
-        noun_chunks = list(doc.noun_chunks)
-        noun_chunks = [each_chunk for each_chunk in noun_chunks if each_chunk.text not in landmark_stopwords]
-        chunk_length = len(noun_chunks)
-        if chunk_length == 0:
-            landmark_triplet = []
-            triplet_vector= np.zeros((1,3,300))
-            return landmark_triplet, triplet_vector
-
-        if chunk_length == 1:
-            triplets.append([noun_chunks[0].text])
-        else:
-            for e_c_id, each_chunk in enumerate(noun_chunks):  
-                if e_c_id == chunk_length-1:
-                    if flag:
-                        break
-                    else:
-                        triplets.append([each_chunk.text])
-                        break
-                next_chunk = noun_chunks[e_c_id+1]
-                start_id = each_chunk.end
-                end_id = next_chunk.start
-                start_phrase = doc[start_id:end_id]
-                flag = 0
-                while start_id < end_id:
-                    if "and" in start_phrase.text or "or" in start_phrase.text:
-                        break
-                    if start_phrase.text in position_list or start_phrase.text in spatial_indicator_list or start_phrase.text in specific_token_list:
-                        flag = 1
-                        triplets.append([each_chunk.text, start_phrase.text, next_chunk.text])
-                        break
-                    start_id = start_id + 1
-                    start_phrase = doc[start_id: end_id]
-                if not flag:
-                    triplets.append([each_chunk.text])
-
-    new_triplet = []
-    for each_tr in triplets:
-        tmp_list = []
-        ### "and" "or" cases (only one component)
-        if " and " in each_tr:
-            tmp_list = each_tr.split('and') 
-        elif " or " in each_tr:
-            tmp_list = each_tr.split('or')
-        if tmp_list:
-            for each_t in tmp_list:
-                new_triplet.append([each_t])
-        else:
-            if len(each_tr) == 3 and each_tr[1] in specific_token_list:
-                new_triplet.append([" ".join(each_tr)])
-            else:    
-                new_triplet.append(each_tr)
-
-    triplet_vector = get_vector_represent(new_triplet)
-          
-    return new_triplet, triplet_vector
-    
-def get_landmark(each_configuration):
-    doc = nlp1(each_configuration)
-    landmark_stopwords = ['right', 'left','front','them', 'you','end','top', 'bottom','it','middle','side']
-    landmark_list =[]
-    landmark_text_list = []
-    if each_configuration in motion_dict:
-        landmark_list=[("", np.zeros(300))]
-        return landmark_list
-
-    for chunk in doc.noun_chunks:
-        landmark_text = chunk.root.text
-        landmark_vector = nlp1(landmark_text).vector
-        if landmark_text not in landmark_stopwords and landmark_text not in landmark_text_list:
-            landmark_list.append((landmark_text, landmark_vector))
-            landmark_text_list.append(landmark_text)
-    if not landmark_list:
-        landmark_list=[("", np.zeros(300))]
-    return landmark_list
-
-def get_motion_indicators(each_configuration):
-    motion_indicator = ""
-    for each_word in motion_dict:
-        if each_word in each_configuration:
-            motion_indicator = each_word
-    if motion_indicator == '':
-        doc = nlp1(each_configuration)
-        for token_id, token in enumerate(doc):
-            try:
-                if token.pos_ == "VERB" and doc[token_id+1].pos_ == "ADP":
-                    motion_indicator = token.text + " " + doc[token_id+1].text
-                elif token.pos_ == "VERB":
-                    motion_indicator = token.text 
-                else:
-                    motion_indicator = doc[0].text    
-            except IndexError:
-                    motion_indicator = token.text  
-    motion_doc = nlp1(motion_indicator)
-    sum_list = []
-    for motion_token in motion_doc:
-        sum_list.append(nlp1(motion_token.text).vector)
-    motion_indicator_vector = np.mean(np.array(sum_list), axis=0)
-    return (motion_indicator, motion_indicator_vector)
-
 
 def load_datasets(splits):
     """
-
     :param splits: A list of split.
         if the split is "something@5000", it will use a random 5000 data from the data
     :return:
@@ -245,7 +96,7 @@ def load_datasets(splits):
     data = []
     old_state = random.getstate()
     for split in splits:
-        # It only needs some part of the dataset?
+        # It only needs some part of the dataset?x
         components = split.split("@")
         number = -1
         if len(components) > 1:
@@ -255,7 +106,7 @@ def load_datasets(splits):
         # if split in ['train', 'val_seen', 'val_unseen', 'test',
         #              'val_unseen_half1', 'val_unseen_half2', 'val_seen_half1', 'val_seen_half2']:       # Add two halves for sanity check
         if "/" not in split:
-            with open('tasks/R2R/data/R2R_%s3.json' % split) as f:
+            with open('tasks/R2R/data/R2R_%s.json' % split) as f:
                 new_data = json.load(f)
         else:
             with open(split) as f:
@@ -273,77 +124,212 @@ def load_datasets(splits):
     return data
 
 def get_configurations(sentence):
-    def combine_process(config_list):
-        new_config_list = []
-        tmp_config_list = []
-        for id, each_config in enumerate(config_list):
-            tmp_config_list.append(each_config)
-            if each_config[0] != '' :
-                new_config_list.append(tmp_config_list)
-                tmp_config_list = []
-        if tmp_config_list:
-            if new_config_list:
-                new_config_list[-1].extend(tmp_config_list)
+    sentence = sentence.lower().strip()
+    sentence_list = sentence.split('.')
+    sentence_list = [each_sentence.strip() for each_sentence in sentence_list]
+    configs = []
+    for each_sentence in sentence_list:  
+        tmp_configs = []
+        num = 0
+        first_v = 0
+        for id, token in enumerate(nlp(each_sentence)):
+#             print(token.text, token.tag_)
+            if token.tag_ == "VB" or token.tag_ == "VBP":
+                if num == 0:
+                    first_v = token.i
+                tmp_configs.append("*")
+                tmp_configs.append(token.text)
+                num += 1
             else:
-                new_config_list.append(tmp_config_list)
-            tmp_config_list = []
+                tmp_configs.append(token.text)
+        if first_v != 0:
+            del tmp_configs[first_v]
+            tmp_configs.insert(0,"*")
+        tmp_configs = " ".join(tmp_configs).split('*')
+        configs += tmp_configs
+    configs1 = post_processing_sentence1(list(filter(None,configs)))
+    configs = post_processing_sentence2(configs1)
+    return configs
 
-        new_config_list = [list(chain(*each_new_config)) for each_new_config in new_config_list]
-        return new_config_list
+def post_processing_sentence2(sentence_list):
+    special_startwith = ['are','is']
+    new_sentence_list = []
+    tmp_id = 100
+    for id, sent in enumerate(sentence_list):
+        if sent:
+            for s_s in special_startwith:
+                if sent.startswith(s_s):
+                    tmp_sent = sentence_list[id-1] + " " + sent
+                    del new_sentence_list[-1]
+                    new_sentence_list.append(tmp_sent)
+                    break
+            else:
+                new_sentence_list.append(sent.strip())
+    return new_sentence_list
 
-    def post_processing_sentence(sentence_list):
-        def func(sl):
-            sl = sl.strip().strip(',').strip('.')
-            for sw in stopword:
-                if sl.endswith(" %s"%sw):
-                    sl = sl[:-(len(sw)+1)]
-                elif sl.endswith("%s"%sw):
-                    sl = sl[:-len(sw)]
-                elif sl.startswith("%s "%sw) or sl.startswith(" %s"%sw):
-                    sl = sl[len(sw)+1:]
-                elif sl.startswith("%s"%sw):
-                    sl = sl[len(sw):]
-            return sl
-        sentence_list = list(map(func, sentence_list))
-        new_sentence_list = []
-        tmp_id = 100
-        for id, sent in enumerate(sentence_list):
-            if sent !='':
-                sent = sent.strip().strip(',').strip('.')
-                if sent.endswith('until you') or sent.endswith ('once you') or sent.endswith ('when you'):
+def post_processing_sentence1(sentence_list):
+    special_endwith = ['that', 'you',"you \'ll", "you will need"]
+    special_startwith = ['are','is']
+    def func(sl):
+        sl = sl.strip().strip(',').strip('.').strip()
+        for sw in stopword:
+            if sl.endswith(" %s"%sw):
+                sl = sl[:-(len(sw)+1)]
+            elif sl.endswith("%s"%sw):
+                sl = sl[:-len(sw)]
+            elif sl.startswith("%s "%sw) or sl.startswith(" %s"%sw):
+                sl = sl[len(sw)+1:]
+            elif sl.startswith("%s"%sw):
+                sl = sl[len(sw):]
+        return sl
+    sentence_list = list(map(func, sentence_list))
+    new_sentence_list = []
+    tmp_id = 100
+    flag = 0
+    config_num = len(sentence_list)
+    for id, sent in enumerate(sentence_list):
+        if sent:
+            for s_e in special_endwith:
+                if sent.endswith(s_e) and id !=config_num-1:
                     tmp_sent = sent + " " + sentence_list[id+1]
                     tmp_id = id + 1
                     new_sentence_list.append(tmp_sent)
+                    flag = 1
+                    break
+            else:
+                if id == tmp_id:
+                    continue
                 else:
-                    if id == tmp_id:
+                    new_sentence_list.append(sent.strip())
+            
+    return new_sentence_list
+
+
+def get_motion_indicator(test_sentence):
+    motion_indicator = ""
+    for each_word in motion_dict:
+        if each_word in test_sentence:
+            motion_indicator = each_word
+            motion_doc = nlp(motion_indicator)
+            break
+    else:
+        doc = nlp(test_sentence)
+        try:
+            for token_id, token in enumerate(doc):
+                if token.tag_ == "VB" or token.tag_ == "VBP":
+                    if doc[token_id+1].pos_ == "ADP":
+                        motion_indicator = token.text + " " + doc[token_id+1].text
+                        motion_doc = [token, doc[token_id+1]]
+                        break
+                    else:
+                        motion_indicator = token.text
+                        motion_doc = [token]
+                        break
+            else:
+                motion_indicator = doc[0].text
+                motion_doc = [doc[0]]
+        except IndexError:
+                motion_indicator = token.text
+                motion_doc = [token]
+   
+    sum_list = []
+    for motion_token in motion_doc:
+        sum_list.append(motion_token.vector)
+    motion_indicator_vector = np.mean(np.array(sum_list), axis=0)
+        
+    return (motion_indicator, motion_indicator_vector)
+
+# def get_landmark(each_configuration):
+#     landmark_stopwords = ['right', 'left','front','them', 'you','end','top', 'bottom','it','middle','side', 'a left', 'a right', 'steps', 'step', 'exit']
+#     doc = nlp(each_configuration)
+#     landmark_list =[]
+#     landmark_text_list = []
+#     landmark_flag = 1
+#     if each_configuration in motion_dict:
+#         landmark_flag = 0
+#         landmark_list=[("", np.zeros(300))]
+#         return [landmark_list, landmark_flag]
+
+#     for chunk in doc.noun_chunks:
+#         landmark_text = chunk.root
+#         if landmark_text not in landmark_text_list and landmark_text.text not in landmark_stopwords:
+#             landmark_vector = landmark_text.vector
+#             landmark_list.append((landmark_text.text, landmark_vector))
+#             landmark_text_list.append(landmark_text)
+#     if not landmark_list:
+#         landmark_flag = 0
+#         landmark_list=[("", np.zeros(300))]
+#     return [landmark_list, landmark_flag]
+
+def get_landmark(each_configuration, whether_root=False):
+    landmark_stopwords = ['right', 'left','front','them', 'you','end','top', 'bottom','it','middle','side', 'a left', 'a right', 'steps', 'step', 'exit', "each", 'other', "far", 'your', 'area']
+    definite_article = ['a', 'an', 'the']
+    area_stopwords = ['area','areas']
+
+    doc = nlp(each_configuration)
+    landmark_list =[]
+    landmark_text_list = []
+    landmark_flag = 1
+    if each_configuration in motion_dict:
+        landmark_flag = 0
+        landmark_list=[("", np.zeros(300))]
+        return [landmark_list, landmark_flag]
+
+    for chunk in doc.noun_chunks:
+        if whether_root:
+            for token_id, each_token in enumerate(chunk):
+                if each_token.text in area_stopwords:
+                    if chunk[0].text in definite_article:
+                        chunk = chunk[1:]
+                        chunk = chunk[token_id-2]
+                    else:
+                        chunk = chunk[token_id-1]
+                    landmark_text = chunk
+                    break
+            else:
+                landmark_text = chunk.root
+            if landmark_text not in landmark_text_list:
+                if landmark_text.text in landmark_stopwords:
                         continue
-                    else:
-                        new_sentence_list.append(sent.strip())   
-        return new_sentence_list
-    
-    sentence = sentence.lower().strip()
-    sentence_list = sentence.split('.')
-    sentence_list = [('', " "+each_sentence+" ") for each_sentence in sentence_list]
-    for each_word in dictionary:
-        for sl in list(sentence_list):
-            if each_word in sl[1]:
-                index = sentence_list.index(sl)
-                sentence_list.remove(sl)
-                tmp_word = sl[1].split(each_word)
-                for id, tt in enumerate(tmp_word):
-                    if id == 0:
-                        tmp_tuple = (sl[0], " "+ tt + " ")
-                    else:
-                        tmp_tuple = (each_word, " "+ tt + " ")
-                    sentence_list.insert(index, tmp_tuple)
-                    index += 1
-  
-    sentence_list = combine_process(sentence_list)
-    sentence_list = [' '.join(filter(None, map(str.strip, each_sentence))) for each_sentence in sentence_list]
-    sentence_list = post_processing_sentence(list(filter(None,sentence_list)))
+                else:
+                    landmark_vector = landmark_text.vector
+                    landmark_list.append((landmark_text.text, landmark_vector))
+                    landmark_text_list.append(landmark_text)
 
-    return sentence_list
+        else:
+            if chunk[0].text in definite_article:
+                landmark_text = chunk[1:]
+            else:
+                landmark_text = chunk
+                          
+    if not landmark_list:
+        landmark_flag = 0
+        landmark_list=[("", np.zeros(300))]
+    return [landmark_list, landmark_flag]
 
+def get_glove_matrix(index_to_word, vector_dim):
+    ''' load GloVE '''
+    glove_path = '/egr/research-hlr/joslin/Matterdata/v1/scans/img_features/glove.6B'
+    vectors = bcolz.open(f'{glove_path}/6B.{vector_dim}.dat')[:]
+    words = pickle.load(open(f'{glove_path}/6B.{vector_dim}_words.pkl', 'rb'))
+    word2idx = pickle.load(open(f'{glove_path}/6B.{vector_dim}_idx.pkl', 'rb'))
+
+    glove = {w: vectors[word2idx[w]] for w in words}
+
+    ''' create the weight matrix '''
+    weights_matrix = np.zeros((len(index_to_word), vector_dim))
+
+    for i in range(len(index_to_word)):
+        word = index_to_word[i]
+        if word == 'others':
+            weights_matrix[i] = np.zeros((vector_dim, ))
+        else:
+            try:
+                weights_matrix[i] = glove[word]
+            except KeyError:
+                print("ERROR")
+
+    return torch.from_numpy(weights_matrix).cuda()
 
 class Tokenizer(object):
     ''' Class to tokenize and encode a sentence. '''
@@ -781,7 +767,3 @@ class FloydGraph:
             #     for x2 in (x, k, y):
             #         print(x1, x2, "%.4f" % self._dis[x1][x2])
             return self.path(x, k) + self.path(k, y)
-
-
-
-

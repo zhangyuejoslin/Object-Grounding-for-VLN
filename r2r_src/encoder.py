@@ -3,8 +3,9 @@ import torch.nn as nn
 from torch.autograd import Variable
 import transformers as ppb
 import numpy as np
-
-
+import en_core_web_lg
+from param import args
+from transformers import LxmertTokenizer
 
 class CustomRNN(nn.Module):
     """
@@ -120,7 +121,7 @@ class EncoderBERT(nn.Module):
                                     dtype=torch.long, device=x.device)
         return x[tuple(indices)]
     
-    def bert_sentence_embedding(self, inputs):
+    def bert_sentence_embedding(self, inputs, seq_len):
         tokenized_dict = self.bert_tokenizer.batch_encode_plus(inputs, add_special_tokens=True, return_attention_mask=True, return_tensors='pt', pad_to_max_length=True, max_length=80)
         split_index_list = []
         for each_token_id in tokenized_dict['input_ids']:
@@ -131,6 +132,15 @@ class EncoderBERT(nn.Module):
         with torch.no_grad():
             last_hidden_states = self.bert_model(padded, attention_mask=attention_mask)
         return last_hidden_states[0], attention_mask, split_index_list
+    
+    def original_bert(self, inputs, seq_len):
+        tokenized_dict = self.bert_tokenizer.batch_encode_plus(inputs, add_special_tokens=True, return_attention_mask=True, return_tensors='pt', pad_to_max_length=True, max_length=seq_len)
+        split_index_list = []
+        padded = tokenized_dict['input_ids'].to(self.bert_model.device)
+        attention_mask = tokenized_dict['attention_mask'].to(self.bert_model.device,dtype=torch.uint8)
+        with torch.no_grad():
+            last_hidden_states = self.bert_model(padded, attention_mask=attention_mask)
+        return last_hidden_states[0], attention_mask
     
     def init_state(self, batch_size, max_config_num, config_mask):
         """ Initial state of model
@@ -160,13 +170,15 @@ class EncoderBERT(nn.Module):
         
         return a0, r0
 
-    def forward(self, inputs):
+    def forward(self, inputs, seq_len=0):
         """
         Expects input vocab indices as (batch, seq_len). Also requires a list of lengths for dynamic batching.
         """
         
-  
-        embeds, embeds_mask, split_index_list = self.bert_sentence_embedding(inputs)
+        if args.configuration:
+            embeds, embeds_mask, split_index_list = self.bert_sentence_embedding(inputs, seq_len)
+        else:
+            embeds, embeds_mask = self.original_bert(inputs, max(seq_len))
         embeds = self.drop(embeds)
        
         if self.bidirectional:
@@ -178,7 +190,11 @@ class EncoderBERT(nn.Module):
         else:
             output, (ht, ct) = self.rnn(embeds, mask=embeds_mask)
 
-        return output.transpose(0, 1), ht.squeeze(dim=0), ct.squeeze(dim=0), embeds_mask, split_index_list
+        if args.configuration:
+            return output.transpose(0, 1), ht.squeeze(dim=0), ct.squeeze(dim=0), embeds_mask, split_index_list
+        else: 
+            return output.transpose(0, 1), ht.squeeze(dim=0), ct.squeeze(dim=0), embeds_mask
+
 
 
 class SoftAttention(nn.Module):
@@ -189,6 +205,7 @@ class SoftAttention(nn.Module):
         super(SoftAttention, self).__init__()
         self.softmax = nn.Softmax(dim=2)
         self.conf_linear = nn.Linear(512, 512)
+        self.conf_linear1 = nn.Linear(300, 512)
 
     def forward(self, cls_input, cls_mask, token_input, token_mask):
         """Propagate h through the network.
@@ -198,7 +215,10 @@ class SoftAttention(nn.Module):
         token_mask: batch x 10 x 13
         """
         # Get attention
-        cls_input = self.conf_linear(cls_input)
+        if cls_input.shape[-1] == 512:
+            cls_input = self.conf_linear(cls_input)
+        else:
+            cls_input = self.conf_linear1(cls_input)
         global new_cls_input
         new_cls_input = cls_input
 
@@ -213,3 +233,7 @@ class SoftAttention(nn.Module):
         weighted_token_input = torch.matmul(new_attn.unsqueeze(dim=2), token_input).squeeze(2) # batch x 10 x 768
 
         return  weighted_token_input, new_attn
+
+
+
+        

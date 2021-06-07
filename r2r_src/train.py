@@ -11,8 +11,10 @@ from utils import read_vocab,write_vocab,build_vocab,Tokenizer,padding_idx,timeS
 import utils
 from env import R2RBatch
 #from configuration_agent import Seq2SeqAgent
+from configuration_agent2 import Seq2SeqAgent 
+#from configuration_agent_LXMERT import Seq2SeqAgent
 #from agent import Seq2SeqAgent
-from configuration_relation_agent import Seq2SeqAgent
+#from configuration_relation_agent import Seq2SeqAgent
 from eval import Evaluation
 from param import args
 
@@ -24,13 +26,14 @@ from tensorboardX import SummaryWriter
 
 
 log_dir = 'snap/%s' % args.name
+checkpoint_dir = '/egr/research-hlr/joslin/Matterdata/v1/scans/checkpoints'
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
 TRAIN_VOCAB = 'tasks/R2R/data/train_vocab.txt'
 TRAINVAL_VOCAB = 'tasks/R2R/data/trainval_vocab.txt'
 
-IMAGENET_FEATURES = 'img_features/ResNet-152-imagenet.tsv'
+IMAGENET_FEATURES = '/egr/research-hlr/joslin/Matterdata/v1/scans/img_features/ResNet-152-imagenet.tsv'
 PLACE365_FEATURES = 'img_features/ResNet-152-places365.tsv'
 
 result_path = "/VL/space/zhan1624/R2R-EnvDrop/result/agent/"
@@ -43,8 +46,10 @@ if args.fast_train:
     features = name + "-fast" + ext
 
 feedback_method = args.feedback # teacher or sample
+start = time.time()
+experiment_time = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
 
-print(args)
+# print(args)
 
 
 def train_speaker(train_env, tok, n_iters, log_every=500, val_envs={}):
@@ -102,7 +107,7 @@ def train_speaker(train_env, tok, n_iters, log_every=500, val_envs={}):
             print("Bleu 1: %0.4f Bleu 2: %0.4f, Bleu 3 :%0.4f,  Bleu 4: %0.4f" % tuple(precisions))
 
 
-def train(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env=None):
+def train(train_env, tok, n_iters, log_every=200, val_envs={}, aug_env=None):
     writer = SummaryWriter(logdir=log_dir)
     listner = Seq2SeqAgent(train_env, "", tok, args.maxAction)
 
@@ -118,8 +123,7 @@ def train(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env=None):
         print("LOAD THE listener from %s" % args.load)
         start_iter = listner.load(os.path.join(args.load))
 
-    start = time.time()
-    experiment_time = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+   
 
     best_val = {'val_seen': {"accu": 0., "state":"", 'update':False},
                 'val_unseen': {"accu": 0., "state":"", 'update':False}}
@@ -197,13 +201,13 @@ def train(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env=None):
                             best_val[env_name]['update'] = True
                 loss_str += ', %s: %.3f' % (metric, val)
         
-
+        #np.save('candidate.npy', listner.candidate)
         for env_name in best_val:
             if best_val[env_name]['update']:
                 best_val[env_name]['state'] = 'Iter %d %s' % (iter, loss_str)
                 best_val[env_name]['update'] = False
-                listner.save(idx, os.path.join("snap", args.name, "state_dict", "best_%s" % (env_name)))
-
+                listner.save(idx, os.path.join(checkpoint_dir, args.name, "state_dict/%s" % str(experiment_time), "best_%s" % (env_name)))
+        #listner.save(idx, os.path.join("snap", args.name, "state_dict/%s" % str(experiment_time), "%s" % (iter)))
         print(('%s (%d %d%%) %s' % (timeSince(start, float(iter)/n_iters),
                                              iter, float(iter)/n_iters*100, loss_str)))
         with open(result_path+str(experiment_time)+".txt", "a") as f_result:
@@ -217,9 +221,9 @@ def train(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env=None):
                 print(env_name, best_val[env_name]['state'])
 
         if iter % 50000 == 0:
-            listner.save(idx, os.path.join("snap", args.name, "state_dict", "Iter_%06d" % (iter)))
+            listner.save(idx, os.path.join(checkpoint_dir, args.name, "state_dict/%s" % str(experiment_time), "Iter_%06d" % (iter)))
 
-    listner.save(idx, os.path.join("snap", args.name, "state_dict", "LAST_iter%d" % (idx)))
+    listner.save(idx, os.path.join(checkpoint_dir, args.name, "state_dict/%s" % str(experiment_time), "LAST_iter%d" % (idx)))
 
 
 def valid(train_env, tok, val_envs={}):
@@ -246,6 +250,14 @@ def valid(train_env, tok, val_envs={}):
             json.dump(
                 result,
                 open(os.path.join(log_dir, "submit_%s.json" % env_name), 'w'),
+                sort_keys=True, indent=4, separators=(',', ': ')
+            )
+        dump_path = log_dir+"/result/" +"%s/" % str(experiment_time)
+        if not os.path.exists(dump_path):
+            os.makedirs(dump_path)
+        json.dump(
+                result,
+                open(os.path.join(log_dir, "result/" +"%s/" % str(experiment_time) +"submit_%s.json" % env_name), 'w'),
                 sort_keys=True, indent=4, separators=(',', ': ')
             )
 
@@ -365,31 +377,41 @@ def train_val():
     feat_dict = read_img_features(features)
 
     featurized_scans = set([key.split("_")[0] for key in list(feat_dict.keys())])
+    
+    if not args.test_obj:
+        print('Loading compact pano-caffe object features ... (~3 seconds)')
+        import pickle as pkl
+        with open('/egr/research-hlr/joslin/Matterdata/v1/scans/img_features/pano_object_class.pkl', 'rb') as f_pc:
+            pano_caffe = pkl.load(f_pc)
+    else:
+        pano_caffe = None
 
-    train_env = R2RBatch(feat_dict, batch_size=args.batchSize, splits=['train'], tokenizer=tok)
+    train_env = R2RBatch(feat_dict, pano_caffe, batch_size=args.batchSize, splits=['train'], tokenizer=tok)
     from collections import OrderedDict
 
     val_env_names = ['val_unseen', 'val_seen']
-    #val_env_names = []
     if args.submit:
         val_env_names.append('test')
     else:
         pass
         # if you want to test "train", just uncomment this
         #val_env_names.append('train')
+ 
 
     if not args.beam:
         val_env_names.append("train") 
 
     val_envs = OrderedDict(
         ((split,
-          (R2RBatch(feat_dict, batch_size=args.batchSize, splits=[split], tokenizer=tok),
+          (R2RBatch(feat_dict, pano_caffe, batch_size=args.batchSize, splits=[split], tokenizer=tok),
            Evaluation([split], featurized_scans, tok))
           )
          for split in val_env_names
          )
     )
-
+    
+    # import sys
+    # sys.exit()
     if args.train == 'listener':
         train(train_env, tok, args.iters, val_envs=val_envs)
     elif args.train == 'validlistener':
@@ -448,10 +470,16 @@ def train_val_augment():
     aug_path = args.aug
 
     # Create the training environment
+    aug_env = R2RBatch(feat_dict, batch_size=args.batchSize,
+                         splits=[aug_path], tokenizer=tok, name='aug')
+    
+    # import sys
+    # sys.exit()
     train_env = R2RBatch(feat_dict, batch_size=args.batchSize,
                          splits=['train'], tokenizer=tok)
-    aug_env   = R2RBatch(feat_dict, batch_size=args.batchSize,
-                         splits=[aug_path], tokenizer=tok, name='aug')
+
+    
+ 
 
     # Printing out the statistics of the dataset
     stats = train_env.get_statistics()

@@ -121,8 +121,10 @@ class EncoderBERT(nn.Module):
                                     dtype=torch.long, device=x.device)
         return x[tuple(indices)]
     
-    def bert_sentence_embedding(self, inputs, seq_len):
-        tokenized_dict = self.bert_tokenizer.batch_encode_plus(inputs, add_special_tokens=True, return_attention_mask=True, return_tensors='pt', pad_to_max_length=True, max_length=80)
+    def bert_sentence_embedding(self, inputs, seq_len, new_size=False):
+        special_tokens_dict = {'additional_special_tokens': ['< bos >','< eos >']}
+        self.bert_tokenizer.add_special_tokens(special_tokens_dict)
+        tokenized_dict = self.bert_tokenizer.batch_encode_plus(inputs, add_special_tokens=True, return_attention_mask=True, return_tensors='pt', pad_to_max_length=True, max_length=150)
         split_index_list = []
         for each_token_id in tokenized_dict['input_ids']:
             tmp_split_index = list(np.where(each_token_id.numpy()==24110)[0])
@@ -130,6 +132,8 @@ class EncoderBERT(nn.Module):
         padded = tokenized_dict['input_ids'].to(self.bert_model.device)
         attention_mask = tokenized_dict['attention_mask'].to(self.bert_model.device)
         with torch.no_grad():
+            if new_size:
+                self.bert_model.resize_token_embeddings(len(self.bert_tokenizer))
             last_hidden_states = self.bert_model(padded, attention_mask=attention_mask)
         return last_hidden_states[0], attention_mask, split_index_list
     
@@ -170,13 +174,13 @@ class EncoderBERT(nn.Module):
         
         return a0, r0
 
-    def forward(self, inputs, seq_len=0):
+    def forward(self, inputs, seq_len=0 , new_size=False):
         """
         Expects input vocab indices as (batch, seq_len). Also requires a list of lengths for dynamic batching.
         """
         
         if args.configuration:
-            embeds, embeds_mask, split_index_list = self.bert_sentence_embedding(inputs, seq_len)
+            embeds, embeds_mask, split_index_list = self.bert_sentence_embedding(inputs, seq_len, new_size)
         else:
             embeds, embeds_mask = self.original_bert(inputs, max(seq_len))
         embeds = self.drop(embeds)

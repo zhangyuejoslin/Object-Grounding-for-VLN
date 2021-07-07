@@ -13,7 +13,7 @@ from torch import optim
 import torch.nn.functional as F
 
 from env import R2RBatch
-from utils import padding_idx, add_idx, Tokenizer, get_configurations, get_motion_indicator, get_landmark
+from utils import padding_idx, add_idx, Tokenizer
 import utils
 import model
 import param
@@ -134,7 +134,6 @@ class Seq2SeqAgent(BaseAgent):
         # Logs
         sys.stdout.flush()
         self.logs = defaultdict(list)
-        self.obj_feat = self._obj_feature(args.obj_img_feat_path)
         self.candidate = {}
         #different spatial features
        
@@ -143,7 +142,11 @@ class Seq2SeqAgent(BaseAgent):
         self.landmark_feature = self.get_landmark_feature(args.train_landmark_path, args.val_seen_landmark_path, \
                                                         args.val_unseen_landmark_path, args.landmark_aug)
         
+        #self.landmark_triplet_vector = self.get_landmark_triplets(args.train_landmark_triplet, args.val_seen_landmark_triplet, args.val_unseen_landmark_triplet)
         
+        # self.motion_indicator_feature = env.motion_indicator
+        # self.landmark_feature = env.landmark
+
     def softmax(self, x):
         s = torch.exp(x)
         return s / torch.sum(s, dim=1, keepdim=True)
@@ -175,19 +178,12 @@ class Seq2SeqAgent(BaseAgent):
     def _feature_variable(self, obs):
         ''' Extract precomputed features into variable. '''
         features = np.empty((len(obs), args.views, self.feature_size + args.angle_feat_size), dtype=np.float32)
+        pano_obj_feat = np.empty((len(obs), args.views, 36, 300), dtype=np.float32)
         for i, ob in enumerate(obs):
             features[i, :, :] = ob['feature']   # Image feat
-        return Variable(torch.from_numpy(features), requires_grad=False).cuda()
+            pano_obj_feat[i,:,:,:] = ob['pano_obj_feat']
+        return Variable(torch.from_numpy(features), requires_grad=False).cuda(), Variable(torch.from_numpy(pano_obj_feat), requires_grad=False)
     
-    def _obj_feature(self, object_img_feat_path):
-        all_obj = np.load(object_img_feat_path, allow_pickle=True).item()
-        for scan_key, scan_value in  all_obj.items():
-            for state_key, state_value in scan_value.items():
-                for heading_elevation_key, heading_elevation_value in state_value.items():
-                    heading_elevation_value['text_feature'] = torch.from_numpy(heading_elevation_value['text_feature'])
-                    heading_elevation_value['text_mask'] = torch.from_numpy(heading_elevation_value['text_mask'])
-
-        return all_obj
     
     def get_motion_indicator_feature(self, train_motion_indi_dir,val_seen_motion_indi_dir,val_unseen_motion_indi_dir, aug_motion_indi_dir, test_motion_indi_dir=None):
         motion_indicator_dict = {}
@@ -240,65 +236,27 @@ class Seq2SeqAgent(BaseAgent):
         return torch.cat([xx, yy], dim=-1)
 
     def _candidate_variable1(self, obs):
-        candidate_leng = [len(ob['candidate']) + 1 for ob in obs]       # +1 is for the end
-
-        candidate_feat = np.zeros((len(obs), max(candidate_leng), self.feature_size + args.angle_feat_size), dtype=np.float32)
-        # Note: The candidate_feat at len(ob['candidate']) is the feature for the END
-        # which is zero in my implementation
-        for i, ob in enumerate(obs):
-            for j, c in enumerate(ob['candidate']):
-                candidate_feat[i, j, :] = c['feature']                         # Image feat
-        return torch.from_numpy(candidate_feat).cuda(), candidate_leng
-
-    def _candidate_variable2(self, obs):
         object_num = 36
         feature_size1 = 300
-        feature_size2 = 152
-        view_size = 4
-        candidate_index = []
-        batch_size = len(obs)
 
-        #candidate_leng = args.candidate_length + 1 # +1 is for the end
-        candidate_len_list = [len(ob['candidate']) + 1 for ob in obs] #maybe change later
-        candidate_leng = max(candidate_len_list)
+        candidate_leng = [len(ob['candidate']) + 1 for ob in obs]       # +1 is for the end
+        max_candidate_leng = max(candidate_leng)
+        candidate_obj_text_feat = np.zeros((len(obs), max_candidate_leng, object_num, feature_size1), dtype=np.float32)
 
-        navigable_obj_text_feat = torch.zeros(batch_size, candidate_leng, object_num, feature_size1)
-        object_mask = torch.zeros(batch_size, candidate_leng, object_num)
-        navigable_obj_img_feat = torch.zeros(batch_size, candidate_leng, object_num, feature_size2)
-        navigable_obj_rel_feat = torch.zeros(batch_size, candidate_leng, object_num, object_num, 12)
-        view_feat = torch.zeros(batch_size, candidate_leng, view_size)
-
+        object_mask = np.zeros((len(obs), max_candidate_leng, object_num))
+        candidate_feat = np.zeros((len(obs), max(candidate_leng), self.feature_size + args.angle_feat_size), dtype=np.float32)
+        object_index = np.zeros((len(obs), max_candidate_leng),dtype=np.int64)
         # Note: The candidate_feat at len(ob['candidate']) is the feature for the END
         # which is zero in my implementation
         for i, ob in enumerate(obs):
-            tmp_candidate_index = []
-            bottom_index_list = []
-            middle_index_list = []
-            top_index_list = []
-            heading_list = []
-            view_list = []
-            # if ob['scan'] not in self.candidate.keys():
-            #     self.candidate[ob['scan']] = {}
-            # if ob['viewpoint'] not in self.candidate[ob['scan']].keys():
-            #     self.candidate[ob['scan']][ob['viewpoint']] = []
-                
             for j, c in enumerate(ob['candidate']):
-                # if (c['viewpointId'], c['normalized_heading']) not in self.candidate[ob['scan']][ob['viewpoint']]:
-                #     self.candidate[ob['scan']][ob['viewpoint']].append((c['viewpointId'], c['normalized_heading']))
-                tmp_candidate_index.append(c['pointId']) # did not include itself
-                bottom_index, middle_index, top_index = self.elevation_index(c['pointId'])
-                bottom_index_list.append(bottom_index)
-                middle_index_list.append(middle_index)
-                top_index_list.append(top_index)
-                heading_list.append(c['normalized_heading'])
-        
-            interval_len = len(bottom_index_list)
-            candidate_index.append(tmp_candidate_index)
-            tmp_obj_text_feat, tmp_mask, tmp_obj_img_feat, tmp_obj_relation = self._faster_rcnn_feature(ob, heading_list)
-            navigable_obj_text_feat[i,:interval_len,:,:] = tmp_obj_text_feat
-            object_mask[i,:interval_len,:] = tmp_mask
-     
-        return navigable_obj_text_feat, object_mask, navigable_obj_img_feat, candidate_index, navigable_obj_rel_feat, view_feat
+                candidate_feat[i, j, :] = c['feature']        # Image feat
+                candidate_obj_text_feat[i,j,:] = c['obj_feat']
+                object_mask[i,j] = c['obj_mask']
+                object_index[i,j] = c['pointId']
+       
+        return torch.from_numpy(candidate_feat).cuda(), candidate_leng, torch.from_numpy(candidate_obj_text_feat).cuda(), torch.from_numpy(object_mask).cuda(), torch.from_numpy(object_index).cuda()
+
 
     def distribute_feature(self, interval_len, pre_feature, feature, candidate_leng):
         pre_feature[0: interval_len] =  feature[0*interval_len:1*interval_len]
@@ -312,46 +270,18 @@ class Seq2SeqAgent(BaseAgent):
         top_index = elevation_level + 12 + 12
         return bottom_index, middle_index, top_index
     
-    def _faster_rcnn_feature(self, ob, heading_list):
-        obj_img_feature = []
-        obj_text_feature = []
-        obj_mask = []
-        object_text = []
-        obj_relation = []
-        #elevation_list = [30*math.pi/180, 0*math.pi/180, -30*math.pi/180]
-        elevation_list = [0*math.pi/180]
-
-        for elevation in elevation_list:
-            for heading in heading_list:
-                temp = int(round((heading*180/math.pi)/30) * 30)
-                if temp >=  360:
-                    temp = temp - 360      
-                elif temp < 0 :
-                    temp = temp + 360
-                obj_text_feature.append(self.obj_feat[ob['scan']][ob['viewpoint']][str(temp*math.pi/180)+'_'+ str(elevation)]['text_feature'])
-                obj_mask.append(self.obj_feat[ob['scan']][ob['viewpoint']][str(temp*math.pi/180)+'_'+ str(elevation)]['text_mask'])
-                #obj_img_feature.append(self.obj_feat[ob['scan']][ob['viewpoint']][str(temp*math.pi/180)+'_'+ str(elevation)]['features'])
-                #obj_relation.append(self.obj_feat[ob['scan']][ob['viewpoint']][str(temp*math.pi/180)+'_'+ str(elevation)]['relation'])
-
-        obj_text_feature = torch.stack(obj_text_feature, dim=0)
-        obj_mask = torch.stack(obj_mask, dim=0)
-        #obj_img_feature = torch.stack(obj_img_feature, dim=0)
-        obj_relation = None
-        obj_img_feature = None
-        return obj_text_feature, obj_mask, obj_img_feature, obj_relation
 
     def get_input_feat(self, obs):
         input_a_t = np.zeros((len(obs), args.angle_feat_size), np.float32)
+
         for i, ob in enumerate(obs):
             input_a_t[i] = utils.angle_feature(ob['heading'], ob['elevation'])
         input_a_t = torch.from_numpy(input_a_t).cuda()
 
-        
-        f_t = self._feature_variable(obs)      # Image features from obs
-        candidate_feat, candidate_leng = self._candidate_variable1(obs)
-        candidate_obj_text_feat, object_mask, candidate_obj_img_feat, candidate_index, candidate_relation, view_feat = self._candidate_variable2(obs)
-        return input_a_t, f_t, candidate_feat, candidate_obj_text_feat, object_mask, candidate_obj_img_feat, candidate_leng, candidate_index, candidate_relation, view_feat
-        #return input_a_t, f_t,candidate_feat,candidate_leng
+        f_t, pano_obj_feat = self._feature_variable(obs)      # Image features from obs
+        candidate_feat, candidate_leng, candidate_obj_text_feat, object_mask, object_index= self._candidate_variable1(obs)
+
+        return input_a_t, f_t, candidate_feat, candidate_obj_text_feat, object_mask, candidate_leng, pano_obj_feat, object_index
     
     def get_cand_object_feat(self, obs):
         top_N_obj = 36
@@ -448,8 +378,6 @@ class Seq2SeqAgent(BaseAgent):
             obs = np.array(self.env._get_obs())
 
         batch_size = len(obs)
-        speak_motion_indicator = {}
-        speak_landmark ={}
 
         if speaker is not None:         # Trigger the self_train mode!
             noise = self.decoder.drop_env(torch.ones(self.feature_size).cuda())
@@ -465,14 +393,8 @@ class Seq2SeqAgent(BaseAgent):
                     inst[-1] = self.tok.word_to_index['<EOS>']
                 datum.pop('instructions')
                 datum.pop('instr_encoding')
-                sentence = self.tok.decode_sentence(inst).lstrip("< BOS >").rstrip('< EOS >')
+                datum['instructions'] = self.tok.decode_sentence(inst)
                 datum['instr_encoding'] = inst
-                each_configuration_list = get_configurations(sentence)
-                for config_id, each_c in enumerate(each_configuration_list):
-                    speak_motion_indicator[str(datum['instr_id']) + "_" + str(config_id)] = get_motion_indicator(each_c)
-                    speak_landmark[str(datum['instr_id']) + "_" + str(config_id)] = get_landmark(each_c, whether_root=True)
-                datum['instructions'] = " Quan ".join(each_configuration_list) + " Quan"
-                datum['configurations'] = each_configuration_list
             obs = np.array(self.env.reset(batch))
 
         # Reorder the language input for the encoder (do not ruin the original code)
@@ -480,7 +402,12 @@ class Seq2SeqAgent(BaseAgent):
         perm_obs = obs[perm_idx]
         sentence = []
         config_num_list = []
+
+        landmark_obj_feat_list = [] 
+        motion_feat_list = []
         landmark_num_list = []
+        triplet_num_list = []
+        view_num_list = []
         instr_id_list = []
 
         for ob_id, each_ob in enumerate(perm_obs):
@@ -488,11 +415,10 @@ class Seq2SeqAgent(BaseAgent):
             config_num_list.append(len(each_ob['configurations']))
             sentence.append(each_ob['instructions'])
             tmp_landmark_num_list = []
+            tmp_triplet_num_list = []
+            tmp_view_num_list = []
             for config_id, each_config in enumerate(each_ob['configurations']):
-                if not speaker:
-                    tmp_landmark_num_list.append(len(self.landmark_feature[each_ob['instr_id']+"_"+str(config_id)][0]))
-                else:
-                    tmp_landmark_num_list.append(len(speak_landmark[each_ob['instr_id']+"_"+str(config_id)][0]))
+                tmp_landmark_num_list.append(len(self.landmark_feature[each_ob['instr_id']+"_"+str(config_id)][0]))
 
             landmark_num_list.append(max(tmp_landmark_num_list))
 
@@ -500,34 +426,27 @@ class Seq2SeqAgent(BaseAgent):
         max_config_num = max(config_num_list)
         max_landmark_num = max(landmark_num_list) 
         landmark_object_feature = torch.zeros(batch_size, max_config_num, max_landmark_num, args.text_dimension).cuda()
-        landmark_mask = torch.zeros(batch_size).cuda()
+        landmark_mask = torch.zeros(batch_size,max_config_num, max_landmark_num).cuda()
         motion_indicator_tensor = torch.zeros(batch_size, max_config_num, args.text_dimension).cuda()
 
-
-
         for ob_id, each_ob in enumerate(perm_obs):
-            tmp_landmark_mask = []
-            tmp_view_mask = []
             for config_id, each_config in enumerate(each_ob['configurations']):
-                if not speaker:
-                    tmp_landmark_tuple = self.landmark_feature[each_ob['instr_id']+"_"+str(config_id)][0]
-                    tmp_landmark_mask.append(self.landmark_feature[each_ob['instr_id']+"_"+str(config_id)][1])
-                    tmp_motion_indi_feat = torch.from_numpy(self.motion_indicator_feature[each_ob['instr_id']+"_"+str(config_id)][1])
-                    tmp_landmark_tensor = torch.from_numpy(np.stack(list(zip(*tmp_landmark_tuple))[1], axis=0))
+                tmp_landmark_tuple = self.landmark_feature[each_ob['instr_id']+"_"+str(config_id)][0]
+                if len(tmp_landmark_tuple)==1 and tmp_landmark_tuple[0][0] == '':
+                    tmp_landmark_mask = (len(tmp_landmark_tuple)*[-1])
                 else:
-                    tmp_landmark_tuple = speak_landmark[each_ob['instr_id']+"_"+str(config_id)][0]
-                    tmp_landmark_mask.append(speak_landmark[each_ob['instr_id']+"_"+str(config_id)][1])
-                    tmp_motion_indi_feat = torch.from_numpy(speak_motion_indicator[each_ob['instr_id']+"_"+str(config_id)][1])
-                    tmp_landmark_tensor = torch.from_numpy(np.stack(list(zip(*tmp_landmark_tuple))[1], axis=0))
+                    tmp_landmark_mask = (len(tmp_landmark_tuple)*[1])
+
+                tmp_motion_indi_feat = torch.from_numpy(self.motion_indicator_feature[each_ob['instr_id']+"_"+str(config_id)][1])
+                tmp_landmark_tensor = torch.from_numpy(np.stack(list(zip(*tmp_landmark_tuple))[1], axis=0))
                 landmark_object_feature[ob_id, config_id, :len(tmp_landmark_tuple),:] = tmp_landmark_tensor
                 motion_indicator_tensor[ob_id, config_id,:] = tmp_motion_indi_feat
-                
-
-        if not speaker:     
-            tmp_ctx, h_t, c_t, tmp_ctx_mask, split_index = self.encoder(sentence, seq_len=seq_lengths)
-        else:
-            tmp_ctx, h_t, c_t, tmp_ctx_mask, split_index = self.encoder(sentence, seq_len=seq_lengths, new_size=True)
+                landmark_mask[ob_id,config_id,:len(tmp_landmark_tuple)] = torch.tensor(tmp_landmark_mask)
+            
+                     
        # ctx, h_t, c_t = self.encoder(sentence_list, seq_lengths)
+        tmp_ctx, h_t, c_t, tmp_ctx_mask, split_index = self.encoder(sentence, seq_len=seq_lengths)
+
         token_num = max([each_split[-1] for each_split in split_index])
         #assert max_config_num == max([len(each_split) for each_split in split_index]) 
         # There are cases that are statisfied with this assertion statement when the length of the sentence larger than 80. So here we just heuritically set all equals max_config_num
@@ -588,43 +507,41 @@ class Seq2SeqAgent(BaseAgent):
         s0[:,0] = 1
         r0[:,0] = 1
         ctx_attn = s0
+        top_N = 3
 
         for t in range(self.episode_len):
             #input_a_t, f_t, candidate_feat, candidate_leng = self.get_input_feat(perm_obs)
             #candidate_obj_text_feat = self.get_cand_object_feat(perm_obs)
 
-            input_a_t, f_t, candidate_feat, candidate_obj_text_feat, object_mask, candidate_obj_img_feat, candidate_leng, candidate_index, candidat_relation, view_img_feat = self.get_input_feat(perm_obs)
+            input_a_t, f_t, candidate_feat, candidate_obj_text_feat, object_mask, candidate_leng, pano_obj_feat, object_index = self.get_input_feat(perm_obs)
             candidate_obj_text_feat = candidate_obj_text_feat.cuda()
+            pano_obj_feat = pano_obj_feat.cuda()
+            object_index = object_index.cuda()
+            
+            #pano_obj_feat = pano_obj_feat[:,:,:top_N,:].cuda()
             # candidat_relation = candidat_relation.cuda()
             #view_img_feat = view_img_feat.cuda()
             #candidat_relation = candidat_relation.cuda()
             object_mask = object_mask.cuda()
-            #candidate_obj_img_feat = candidate_obj_img_feat.cuda()
             
             if speaker is not None:       # Apply the env drop mask to the feat
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
 
             r_t = r0 if t==0 else None
-            #landamrk similarity
-         
-            #view_object_similarity = torch.matmul(candidate_obj_text_feat,torch.transpose(view_feature[:,:,:,0].view(batch_size, -1,300).unsqueeze(1),3,2)).view(batch_size, image_num, object_num, max_config_num, -1)
-            #obj_rel_arg_feat = self.cartesian_product(candidate_obj_text_feat.view(-1,object_num,obj_feat_dim), candidate_obj_text_feat.view(-1,object_num,obj_feat_dim)).view(batch_size, image_num, object_num, object_num, obj_feat_dim*2)   
-           
-            landmark_triplet_feature = None
-            view_feature = None
-            view_mask = None
-            view_object_similarity = None
-            obj_rel_arg_feat = None
+            #landamrk similarity 
 
             candidate_mask = utils.length2mask(candidate_leng)
 
+            new_candidate_leng = list(map(lambda x:x-1,candidate_leng))
+            new_candidate_mask = utils.length2mask(new_candidate_leng, size=max(candidate_leng))
+
             h_t, c_t, logit, h1, ctx_attn = self.decoder(input_a_t, f_t, candidate_feat,
                                                h_t, h1, c_t,
-                                               ctx, t, ctx_attn, r_t, ctx_mask, object_mask=object_mask, candidate_mask = candidate_mask, landmark_object_feature = landmark_object_feature, candidate_obj_img_feat = candidate_obj_img_feat, candidate_obj_text_feat = candidate_obj_text_feat ,landmark_mask=landmark_mask,
-                                               landmark_triplet_feature=landmark_triplet_feature, obj_rel_arg_feat=obj_rel_arg_feat, candidat_relation=candidat_relation, 
-                                               view_img_feat=view_img_feat, view_feature=view_feature, view_object_similarity=view_object_similarity, view_mask=view_mask,
+                                               ctx, t, ctx_attn, r_t, ctx_mask, object_mask=object_mask, candidate_mask = new_candidate_mask, landmark_object_feature = landmark_object_feature, candidate_obj_img_feat = None, candidate_obj_text_feat = candidate_obj_text_feat ,landmark_mask=landmark_mask,
+                                               pano_obj_feat=pano_obj_feat, object_index =object_index,
                                                already_dropfeat=(speaker is not None))
+       
 
             hidden_states.append(h_t)
             # Mask outputs where agent can't move forward
@@ -716,8 +633,10 @@ class Seq2SeqAgent(BaseAgent):
             #
             # input_a_t, f_t, candidate_feat, candidate_leng = self.get_input_feat(perm_obs)
             
-            input_a_t, f_t, candidate_feat, candidate_obj_text_feat, object_mask, candidate_obj_img_feat, candidate_leng, candidate_index, candidat_relation, view_img_feat = self.get_input_feat(perm_obs)
+            input_a_t, f_t, candidate_feat, candidate_obj_text_feat, object_mask, candidate_leng, pano_obj_feat, object_index = self.get_input_feat(perm_obs)
             candidate_obj_text_feat = candidate_obj_text_feat.cuda()
+            pano_obj_feat = pano_obj_feat.cuda()
+            #pano_obj_feat = pano_obj_feat[:,:,:top_N].cuda()
             # candidat_relation = candidat_relation.cuda()
             #view_img_feat = view_img_feat.cuda()
             #candidat_relation = candidat_relation.cuda()
@@ -730,22 +649,13 @@ class Seq2SeqAgent(BaseAgent):
 
             r_t = r0 if t==0 else None
             #landamrk similarity
-         
-            #view_object_similarity = torch.matmul(candidate_obj_text_feat,torch.transpose(view_feature[:,:,:,0].view(batch_size, -1,300).unsqueeze(1),3,2)).view(batch_size, image_num, object_num, max_config_num, -1)
-            #obj_rel_arg_feat = self.cartesian_product(candidate_obj_text_feat.view(-1,object_num,obj_feat_dim), candidate_obj_text_feat.view(-1,object_num,obj_feat_dim)).view(batch_size, image_num, object_num, object_num, obj_feat_dim*2)   
-           
-            landmark_triplet_feature = None
-            view_feature = None
-            view_mask = None
-            view_object_similarity = None
-            obj_rel_arg_feat = None
 
             candidate_mask = utils.length2mask(candidate_leng)
+
             last_h_, _, _, _, _ = self.decoder(input_a_t, f_t, candidate_feat,
                                                h_t, h1, c_t,
-                                               ctx, t, ctx_attn, r_t, ctx_mask, object_mask=object_mask, candidate_mask = candidate_mask, landmark_object_feature = landmark_object_feature, candidate_obj_img_feat = candidate_obj_img_feat, candidate_obj_text_feat = candidate_obj_text_feat ,landmark_mask=landmark_mask,
-                                               landmark_triplet_feature=landmark_triplet_feature, obj_rel_arg_feat=obj_rel_arg_feat, candidat_relation=candidat_relation, 
-                                               view_img_feat=view_img_feat, view_feature=view_feature, view_object_similarity=view_object_similarity, view_mask=view_mask,
+                                               ctx, t, ctx_attn, r_t, ctx_mask, object_mask=object_mask, candidate_mask = candidate_mask, landmark_object_feature = landmark_object_feature, candidate_obj_img_feat = None, candidate_obj_text_feat = candidate_obj_text_feat ,landmark_mask=landmark_mask,
+                                               pano_obj_feat=pano_obj_feat, object_index =object_index,
                                                already_dropfeat=(speaker is not None))
 
             rl_loss = 0.

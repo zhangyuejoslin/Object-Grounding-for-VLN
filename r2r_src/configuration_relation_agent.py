@@ -20,8 +20,6 @@ import param
 from param import args
 from collections import defaultdict
 import encoder
-from model import ObjEncoder
-
 
 
 class BaseAgent(object):
@@ -100,11 +98,7 @@ class Seq2SeqAgent(BaseAgent):
         enc_hidden_size = args.rnn_dim//2 if args.bidir else args.rnn_dim
         # self.encoder = model.EncoderLSTM(tok.vocab_size(), args.wemb, enc_hidden_size, padding_idx,
         #                                  args.dropout, bidirectional=args.bidir).cuda()
-        self.glove_dim = 300
-        # with open('/VL/space/zhan1624/R2R-EnvDrop/img_features/object_vocab.txt', 'r') as f_ov:
-        #     self.obj_vocab = [k.strip() for k in f_ov.readlines()]
-        # glove_matrix = get_glove_matrix(self.obj_vocab, self.glove_dim)
-        # self.objencoder = ObjEncoder(glove_matrix.size(0), glove_matrix.size(1), glove_matrix).cuda()
+        self.vocab_embedding = np.load('/home/hlr/shared/data/joslin/object_vocab.npy')
         
 
         encoder_kwargs = {
@@ -179,10 +173,13 @@ class Seq2SeqAgent(BaseAgent):
         ''' Extract precomputed features into variable. '''
         features = np.empty((len(obs), args.views, self.feature_size + args.angle_feat_size), dtype=np.float32)
         pano_obj_feat = np.empty((len(obs), args.views, 36, 300), dtype=np.float32)
+        pano_obj_mask = np.empty((len(obs), args.views, 36), dtype=np.float32)
         for i, ob in enumerate(obs):
             features[i, :, :] = ob['feature']   # Image feat
-            pano_obj_feat[i,:,:,:] = ob['pano_obj_feat']
-        return Variable(torch.from_numpy(features), requires_grad=False).cuda(), Variable(torch.from_numpy(pano_obj_feat), requires_grad=False)
+            pano_obj_feat[i,:,:,:] = self.vocab_embedding[ob['pano_obj_feat']]
+            pano_obj_mask[i,:,:] = ob['pano_obj_mask']
+        return Variable(torch.from_numpy(features), requires_grad=False).cuda(), \
+            Variable(torch.from_numpy(pano_obj_feat), requires_grad=False)
     
     
     def get_motion_indicator_feature(self, train_motion_indi_dir,val_seen_motion_indi_dir,val_unseen_motion_indi_dir, test_motion_indi_dir=None):
@@ -243,7 +240,7 @@ class Seq2SeqAgent(BaseAgent):
         candidate_obj_text_feat = np.zeros((len(obs), max_candidate_leng, object_num, feature_size1), dtype=np.float32)
 
         object_mask = np.zeros((len(obs), max_candidate_leng, object_num))
-        candidate_feat = np.zeros((len(obs), max_candidate_leng, self.feature_size + args.angle_feat_size), dtype=np.float32)
+        candidate_feat = np.zeros((len(obs), max(candidate_leng), self.feature_size + args.angle_feat_size), dtype=np.float32)
         object_index = np.zeros((len(obs), max_candidate_leng),dtype=np.int64)
         object_relation = np.zeros((len(obs), max_candidate_leng, object_rel),dtype=np.float32)
         # Note: The candidate_feat at len(ob['candidate']) is the feature for the END
@@ -251,12 +248,17 @@ class Seq2SeqAgent(BaseAgent):
         for i, ob in enumerate(obs):
             for j, c in enumerate(ob['candidate']):
                 candidate_feat[i, j, :] = c['feature']        # Image feat
-                candidate_obj_text_feat[i,j,:] = c['obj_feat']
+                if isinstance(c['obj_feat'], tuple):
+                    c['obj_feat'] = c['obj_feat'][0]
+                if isinstance(c['obj_mask'], tuple):
+                    c['obj_mask'] = c['obj_mask'][0]
+                candidate_obj_text_feat[i,j,:] = self.vocab_embedding[c['obj_feat']]
                 object_mask[i,j] = c['obj_mask']
                 object_index[i,j] = c['pointId']
                 object_relation[i,j,:] = c['obj_rel']
        
-        return torch.from_numpy(candidate_feat).cuda(), candidate_leng, torch.from_numpy(candidate_obj_text_feat).cuda(), torch.from_numpy(object_mask).cuda(), torch.from_numpy(object_index).cuda(),  torch.from_numpy(object_relation).cuda()
+        return torch.from_numpy(candidate_feat).cuda(), candidate_leng, torch.from_numpy(candidate_obj_text_feat).cuda(), torch.from_numpy(object_mask).cuda(), torch.from_numpy(object_index).cuda(),\
+             torch.from_numpy(object_relation).cuda()
 
 
     def distribute_feature(self, interval_len, pre_feature, feature, candidate_leng):
@@ -284,23 +286,6 @@ class Seq2SeqAgent(BaseAgent):
 
         return input_a_t, f_t, candidate_feat, candidate_obj_text_feat, object_mask, candidate_leng, pano_obj_feat, object_index, object_relation
     
-    def get_cand_object_feat(self, obs):
-        top_N_obj = 36
-        candidate_leng = [len(ob['candidate']) + 1 for ob in obs]
-
-        batch_size = len(obs); max_cand = max(candidate_leng)
-        temp_obj_label = np.zeros((batch_size, max_cand, top_N_obj), np.float32)
-        for i, ob in enumerate(obs):
-            for j, c in enumerate(ob['cand_objects']):
-                temp_obj_label[i, j, :] = c
-
-        temp_obj_label = temp_obj_label.reshape(batch_size, max_cand*top_N_obj)
-        cand_obj_label_enc = self.objencoder(torch.from_numpy(temp_obj_label).cuda().long())
-
-        cand_obj_label = cand_obj_label_enc.reshape(batch_size, max_cand, top_N_obj, self.glove_dim)
-        cand_object_feat = Variable(cand_obj_label, requires_grad=False).cuda()
-
-        return cand_object_feat
 
     def _teacher_action(self, obs, ended):
         """
@@ -1126,3 +1111,4 @@ class Seq2SeqAgent(BaseAgent):
         for param in all_tuple:
             recover_state(*param)
         return states['encoder']['epoch'] - 1
+

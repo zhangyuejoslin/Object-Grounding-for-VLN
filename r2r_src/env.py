@@ -1,5 +1,6 @@
 ''' Batched Room-to-Room navigation environment '''
 
+import pickle
 import sys
 sys.path.append('buildpy36')
 import MatterSim
@@ -18,7 +19,6 @@ from tqdm import tqdm
 from utils import load_datasets, load_nav_graphs, Tokenizer, get_configurations, get_motion_indicator, get_landmark
 
 csv.field_size_limit(sys.maxsize)
-
 
 class EnvBatch():
     ''' A simple wrapper for a batch of MatterSim environments, 
@@ -99,20 +99,19 @@ class R2RBatch():
         if feature_store:
             self.feature_size = self.env.feature_size
         self.data = []
+        self.configs = {}
+      
         self.motion_indicator = {}
         self.landmark = {}
-        self.configs = {}
-
-       
-        if name:
-            config_aug = np.load("/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components1/aug/configs_aug.npy", allow_pickle=True).item()
-            self.configs.update(config_aug)
+        
+        # if name:
+        #     config_aug = np.load("/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components1/aug/configs_aug.npy", allow_pickle=True).item()
+        #     self.configs.update(config_aug)
    
-        else:
+        if not name:
             configs = np.load(args.configpath+"configs_"+splits[0]+".npy", allow_pickle=True).item()
             self.configs.update(configs)
-   
-       
+    
         if tokenizer:
             self.tok = tokenizer
         scans = []
@@ -124,17 +123,19 @@ class R2RBatch():
                 new_item = dict(item)
                 new_item['instr_id'] = '%s_%d' % (item['path_id'], j)
                 #new_item['instr_id'] = str(item['path_id'])
-                if args.configuration:
+                if args.configuration and not name:
+                    #each_configuration_list = get_configurations(instr)
+                    #self.configs[str(new_item['instr_id'])] = each_configuration_list
                     each_configuration_list = self.configs[str(new_item['instr_id'])]
                     # instr = "Exit closet, and walk past bed. Walk out open bedroom door, and wait at top of stair landing. "
                     # each_configuration_list = get_configurations(instr)
                     # self.configs[str(new_item['instr_id'])] = each_configuration_list
 
-                    '''
-                    for config_id, each_c in enumerate(each_configuration_list):
-                        self.motion_indicator[str(new_item['instr_id']) + "_" + str(config_id)] = get_motion_indicator(each_c)
-                        self.landmark[str(new_item['instr_id']) + "_" + str(config_id)] = get_landmark(each_c, whether_root=True)
-                    '''
+                    
+                    #for config_id, each_c in enumerate(each_configuration_list):
+                        #self.motion_indicator[str(new_item['instr_id']) + "_" + str(config_id)] = get_motion_indicator(each_c)
+                        #self.landmark[str(new_item['instr_id']) + "_" + str(config_id)] = get_landmark(each_c, whether_root=True)
+                    
 
                     '''
                     for config_id, each_c in enumerate(each_configuration_list):
@@ -145,8 +146,8 @@ class R2RBatch():
                     configuration_length = len(each_configuration_list)
                     tmp_str = " Quan ".join(each_configuration_list) + " Quan"
                     new_item['instructions'] = tmp_str
+
                     if configuration_length:
-                        scans.append(item['scan'])
                         self.data.append((len(new_item['configurations']), new_item)) 
 
                     if tokenizer:
@@ -159,40 +160,38 @@ class R2RBatch():
                         new_item['instr_encoding'] = tokenizer.encode_sentence(instr)
                     if not tokenizer or new_item['instr_encoding'] is not None:  # Filter the wrong data
                         self.data.append(new_item)
-        '''
-        if name:
-            np.save(f"/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components1/aug/configs_aug.npy", self.configs)
-            np.save(f"/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components1/aug/motion_indicator_aug.npy", self.motion_indicator)
-            np.save(f"/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components1/aug/landmark_aug.npy", self.landmark)
-     
-        '''
-        '''
-        np.save(f"/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components2/configs/configs_{splits[0]}.npy", self.configs)
-        np.save(f"/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components2/motion_indicator/motion_indicator_{splits[0]}.npy", self.motion_indicator)
-        np.save(f"/VL/space/zhan1624/R2R-EnvDrop/r2r_src/components2/landmarks/landmark_{splits[0]}.npy", self.landmark)
-        '''
+                scans.append(item['scan'])
+
+       
+        # np.save(f"/home/joslin/R2R-EnvDrop/r2r_src/R4R_components/configs/configs_{splits[0]}.npy", self.configs)
+        # np.save(f"/home/joslin/R2R-EnvDrop/r2r_src/R4R_components/motion_indicator/motion_indicator_{splits[0]}.npy", self.motion_indicator)
+        #np.save(f"/home/joslin/R2R-EnvDrop/r2r_src/components3/landmarks/landmark_{splits[0]}.npy", self.landmark)
+        
         if name is None:
             self.name = splits[0] if len(splits) > 0 else "FAKE"
         else:
             self.name = name
         self.pano_caffee = pano_caffee
+        #self.pano_caffee1 = np.load(args.obj_img_feat_path1,allow_pickle=True).item()
 
         self.scans = set(scans)
         self.splits = splits
         
-        if args.configuration:
-            self.data.sort(key=lambda x: x[0])
+        
+        #self.data.sort(key=lambda x: x[0])
+        if not name:
             self.data = list(map(lambda item:item[1], self.data))
-        else:
-            self.seed = seed
-            random.seed(self.seed)
-            random.shuffle(self.data)
+       
+        self.seed = seed
+        random.seed(self.seed)
+        random.shuffle(self.data)
         
         self.ix = 0
         self.batch_size = batch_size
         self._load_nav_graphs()
 
         self.angle_feature = utils.get_all_point_angle_feature()
+
         self.sim = utils.new_simulator()
         self.buffered_state_dict = {}
 
@@ -263,8 +262,9 @@ class R2RBatch():
     def make_candidate(self, feature, scanId, viewpointId, viewId):
         def _loc_distance(loc):
             return np.sqrt(loc.rel_heading ** 2 + loc.rel_elevation ** 2)
-        def get_relative_position(loc_heading, base_heading):
-            left, right, front, back = 0, 0, 0, 0
+        
+        def get_relative_position(loc_heading, base_heading, loc_elevation):
+            left, right, front, back, up, down = 0, 0, 0, 0, 0, 0
             if abs(loc_heading) >=  math.pi/180*180:
                 if loc_heading > 0:
                     loc_heading = loc_heading - math.pi/180*360      
@@ -283,7 +283,13 @@ class R2RBatch():
                     front = 1
                 else:
                     back = 1
-            return [left, right, front, back]
+            
+            if loc_elevation < -math.pi/180 * 30:
+                down = 1
+            elif loc_elevation >= math.pi/180 * 30:
+                up = 1
+            
+            return [left, right, front, back, up, down]
         
         base_heading = (viewId % 12) * math.radians(30)
         adj_dict = {}
@@ -315,9 +321,9 @@ class R2RBatch():
                     # Heading and elevation for for the loc
                     loc_heading = heading + loc.rel_heading
                     loc_elevation = elevation + loc.rel_elevation
-
-                    relative_position = get_relative_position(loc_heading, base_heading)
                     angle_feat = utils.angle_feature(loc_heading, loc_elevation)
+                    relative_position = get_relative_position(loc_heading, base_heading, loc_elevation)
+
                     if (loc.viewpointId not in adj_dict or
                             distance < adj_dict[loc.viewpointId]['distance']):
                         adj_dict[loc.viewpointId] = {
@@ -330,7 +336,10 @@ class R2RBatch():
                             'distance': distance,
                             'idx': j + 1,
                             'feature': np.concatenate((visual_feat, angle_feat), -1),
-                            'relative_position': relative_position
+                            'obj_feat': self.pano_caffee[scanId][viewpointId][ix]['text_feature'],
+                            'obj_mask': self.pano_caffee[scanId][viewpointId][ix]['text_mask'],
+                            'obj_text': self.pano_caffee[scanId][viewpointId][ix]['text'],
+                            'obj_rel': relative_position
                         }
             candidate = list(adj_dict.values())
             self.buffered_state_dict[long_id] = [
@@ -346,32 +355,47 @@ class R2RBatch():
             candidate_new = []
             for c in candidate:
                 c_new = c.copy()
+                # if c_new['scanId']+"_"+c_new['viewpointId'] in self.buffered_state_dict:
                 ix = c_new['pointId']
                 normalized_heading = c_new['normalized_heading']
                 visual_feat = feature[ix]
+                # visual_feat = self.env.features[scanId+"_"+c_new['viewpointId']][ix]
                 loc_heading = normalized_heading - base_heading
                 c_new['heading'] = loc_heading
-                relative_position_new = get_relative_position(loc_heading, base_heading)
                 angle_feat = utils.angle_feature(c_new['heading'], c_new['elevation'])
                 c_new['feature'] = np.concatenate((visual_feat, angle_feat), -1)
-                c_new['relative_position'] = relative_position_new
-                #c_new.pop('normalized_heading')
+                c_new['obj_feat']= self.pano_caffee[scanId][c_new['viewpointId']][ix]['text_feature']
+                c_new['obj_mask']= self.pano_caffee[scanId][c_new['viewpointId']][ix]['text_mask']
+                c_new['obj_text']= self.pano_caffee[scanId][c_new['viewpointId']][ix]['text']
+                new_relative_position = get_relative_position(loc_heading, base_heading, c_new['elevation'])
+                c_new['obj_rel'] = new_relative_position
                 candidate_new.append(c_new)
+                # else:
+                #     ix = c_new['pointId']
+                #     normalized_heading = c_new['normalized_heading']
+                #     visual_feat = feature[ix]
+                #     loc_heading = normalized_heading - base_heading
+                #     c_new['heading'] = loc_heading
+                #     angle_feat = utils.angle_feature(c_new['heading'], c_new['elevation'])
+                #     c_new['feature'] = np.concatenate((visual_feat, angle_feat), -1)
+                #     c_new['obj_feat']= self.pano_caffee[scanId][viewpointId][ix]['text_feature']
+                #     c_new['obj_mask']= self.pano_caffee[scanId][viewpointId][ix]['text_mask']
+                #     new_relative_position = get_relative_position(loc_heading, base_heading, c_new['elevation'])
+                #     c_new['obj_rel'] = new_relative_position
+                #     candidate_new.append(c_new)
+                    
             return candidate_new
-    def process_obj_feat(self, obj_data, top_N_obj):
-        obj_label = obj_data['object_class']
-        obj_label = np.array(obj_label[:top_N_obj])
-
-        return obj_label
-    def object_feats(self, obj_pkl, candidate, top_N_obj, statepoint=None):
-        cand_obj_list = []
-        for j, cand in enumerate(candidate):
-            if args.test_obj:
-                print('ERROR')
-            else:
-                obj_label = self.process_obj_feat(obj_pkl[cand['scanId']][statepoint][cand['pointId']], top_N_obj)
-            cand_obj_list.append((obj_label))
-        return cand_obj_list
+            
+    def get_pano_obj(self, pano_caffee, scan_id, viewpoint_id):
+        #pano_obj_feat = np.empty((args.views, 36, 300), dtype=np.float32)
+        pano_obj_feat = np.empty((args.views, 36), dtype=np.int32)
+        pano_obj_mask = np.empty((args.views, 36), dtype=np.float32)
+        assert len(pano_caffee[scan_id][viewpoint_id]) == 36
+        for key, value in pano_caffee[scan_id][viewpoint_id].items():
+            pano_obj_feat[key,:] = value['text_feature']
+            pano_obj_mask[key,:] = value['text_mask']
+        return pano_obj_feat, pano_obj_mask
+  
 
     def _get_obs(self):
         obs = []
@@ -380,13 +404,8 @@ class R2RBatch():
             base_view_id = state.viewIndex
 
             # Full features
+            pano_obj_feat, pano_obj_mask = self.get_pano_obj(self.pano_caffee, state.scanId, state.location.viewpointId)
             candidate = self.make_candidate(feature, state.scanId, state.location.viewpointId, state.viewIndex)
-            top_N_obj = 36
-            # if args.test_obj:
-            #     print("ERROR")
-            # else:
-            #     cand_obj_list = self.object_feats(self.pano_caffee, candidate, top_N_obj, state.location.viewpointId)
-            # (visual_feature, angel_feature) for views
             feature = np.concatenate((feature, self.angle_feature[base_view_id]), -1)
             obs.append({
                 'instr_id' : item['instr_id'],
@@ -396,14 +415,17 @@ class R2RBatch():
                 'heading' : state.heading,
                 'elevation' : state.elevation,
                 'feature' : feature,
-                #'cand_objects': cand_obj_list,
                 'candidate': candidate,
                 'navigableLocations' : state.navigableLocations,
-                'configurations': item['configurations'],
+                #'configurations': item['configurations'],
                 'instructions' : item['instructions'],
                 'teacher' : self._shortest_path_action(state, item['path'][-1]),
-                'path_id' : item['path_id']
+                'path_id' : item['path_id'],
+                'pano_obj_feat': pano_obj_feat,
+                'pano_obj_mask': pano_obj_mask
             })
+            if 'configurations' in item:
+                obs[-1]['configurations'] = item['configurations']
             if 'instr_encoding' in item:
                 obs[-1]['instr_encoding'] = item['instr_encoding']
             # A2C reward. The negative distance between the state and the final state

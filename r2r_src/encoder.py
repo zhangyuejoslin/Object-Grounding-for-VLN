@@ -5,7 +5,8 @@ import transformers as ppb
 import numpy as np
 import en_core_web_lg
 from param import args
-from transformers import LxmertTokenizer
+from transformers import LxmertTokenizer, LxmertModel
+from utils import glove_embedding
 
 class CustomRNN(nn.Module):
     """
@@ -107,6 +108,7 @@ class EncoderBERT(nn.Module):
         }
         self.rnn = CustomRNN(**self.rnn_kwargs)
         self.sf = SoftAttention(dimension=embedding_size)
+        self.glove_indexer, self.glove_vector = glove_embedding("r2r_src/MAF/data/glove/glove.6B.300d.txt")
 
     def create_mask(self, batchsize, max_length, length):
         """Given the length create a mask given a padded tensor"""
@@ -121,12 +123,19 @@ class EncoderBERT(nn.Module):
                                     dtype=torch.long, device=x.device)
         return x[tuple(indices)]
     
-    def bert_sentence_embedding(self, inputs, seq_len, new_size=False):
-        special_tokens_dict = {'additional_special_tokens': ['< bos >','< eos >']}
+    def bert_sentence_embedding(self, inputs, seq_len, new_size=False, landmark_input=None):
+        special_tokens_dict = {'additional_special_tokens': ['< bos >','< eos >', '< pad >']}
         self.bert_tokenizer.add_special_tokens(special_tokens_dict)
-        tokenized_dict = self.bert_tokenizer.batch_encode_plus(inputs, add_special_tokens=True, return_attention_mask=True, return_tensors='pt', pad_to_max_length=True, max_length=150)
+        tokenized_dict = self.bert_tokenizer.batch_encode_plus(inputs, add_special_tokens=True, return_attention_mask=True, return_tensors='pt', pad_to_max_length=True, max_length=seq_len)
         split_index_list = []
-        for each_token_id in tokenized_dict['input_ids']:
+        landmark_id_list = []
+        for count_id1, each_token_id in enumerate(tokenized_dict['input_ids']):
+            tmp_landmark_id_list = {}
+            if landmark_input[count_id1]:
+                for count_id2, each_landmark_token in enumerate(self.bert_tokenizer.convert_ids_to_tokens(each_token_id)):
+                    if each_landmark_token in landmark_input[count_id1]:
+                        tmp_landmark_id_list[count_id2] = self.glove_vector[self.glove_indexer.add_and_get_index(each_landmark_token)]
+            landmark_id_list.append(tmp_landmark_id_list)
             tmp_split_index = list(np.where(each_token_id.numpy()==24110)[0])
             split_index_list.append(tmp_split_index)
         padded = tokenized_dict['input_ids'].to(self.bert_model.device)
@@ -135,7 +144,10 @@ class EncoderBERT(nn.Module):
             if new_size:
                 self.bert_model.resize_token_embeddings(len(self.bert_tokenizer))
             last_hidden_states = self.bert_model(padded, attention_mask=attention_mask)
-        return last_hidden_states[0], attention_mask, split_index_list
+        if landmark_input:
+            return last_hidden_states[0], attention_mask, split_index_list, landmark_id_list
+        else:
+            return last_hidden_states[0], attention_mask, split_index_list
     
     def original_bert(self, inputs, seq_len):
         tokenized_dict = self.bert_tokenizer.batch_encode_plus(inputs, add_special_tokens=True, return_attention_mask=True, return_tensors='pt', pad_to_max_length=True, max_length=seq_len)
@@ -174,16 +186,19 @@ class EncoderBERT(nn.Module):
         
         return a0, r0
 
-    def forward(self, inputs, seq_len=0 , new_size=False):
+    def forward(self, inputs, seq_len=0 , new_size=False, landmark_input=None):
         """
         Expects input vocab indices as (batch, seq_len). Also requires a list of lengths for dynamic batching.
         """
         
         if args.configuration:
-            embeds, embeds_mask, split_index_list = self.bert_sentence_embedding(inputs, seq_len, new_size)
+            if landmark_input:
+                original_embeds, embeds_mask, split_index_list, landmark_id_list = self.bert_sentence_embedding(inputs, seq_len, new_size, landmark_input)
+            else:
+                original_embeds, embeds_mask, split_index_list = self.bert_sentence_embedding(inputs, seq_len, new_size, landmark_input)
         else:
-            embeds, embeds_mask = self.original_bert(inputs, max(seq_len))
-        embeds = self.drop(embeds)
+            original_embeds, embeds_mask = self.original_bert(inputs, seq_len)
+        embeds = self.drop(original_embeds)
        
         if self.bidirectional:
             output_1, (ht_1, ct_1) = self.rnn(embeds, mask=embeds_mask)
@@ -195,9 +210,10 @@ class EncoderBERT(nn.Module):
             output, (ht, ct) = self.rnn(embeds, mask=embeds_mask)
 
         if args.configuration:
-            return output.transpose(0, 1), ht.squeeze(dim=0), ct.squeeze(dim=0), embeds_mask, split_index_list
-        else: 
-            return output.transpose(0, 1), ht.squeeze(dim=0), ct.squeeze(dim=0), embeds_mask
+            if landmark_input:
+                return  output.transpose(0, 1), ht.squeeze(dim=0), ct.squeeze(dim=0), embeds_mask, split_index_list, original_embeds, landmark_id_list
+            else:
+                return  output.transpose(0, 1), ht.squeeze(dim=0), ct.squeeze(dim=0), embeds_mask, split_index_list
 
 
 
@@ -240,4 +256,3 @@ class SoftAttention(nn.Module):
 
 
 
-        

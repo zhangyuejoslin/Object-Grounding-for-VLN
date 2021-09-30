@@ -20,6 +20,9 @@ import param
 from param import args
 from collections import defaultdict
 import encoder
+from MAF.test import MAF_representation
+from MAF.utils.utils import load_vocabulary, init_net
+from MAF.model import MATnet
 
 
 class BaseAgent(object):
@@ -99,7 +102,6 @@ class Seq2SeqAgent(BaseAgent):
         # self.encoder = model.EncoderLSTM(tok.vocab_size(), args.wemb, enc_hidden_size, padding_idx,
         #                                  args.dropout, bidirectional=args.bidir).cuda()
         self.vocab_embedding = np.load('/egr/research-hlr/joslin/Matterdata/v1/scans/img_features/object_vocab.npy')
-        
 
         encoder_kwargs = {
         'vocab_size': tok.vocab_size(),
@@ -111,7 +113,7 @@ class Seq2SeqAgent(BaseAgent):
         'num_layers': args.rnn_num_layers
     }
         self.encoder = encoder.EncoderBERT(**encoder_kwargs).cuda()
-        self.decoder = nn.DataParallel(model.ConfigurationRelationDecoder(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda())
+        self.decoder = nn.DataParallel(model.ConfigurationMAFDecoder(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda())
         self.critic = nn.DataParallel(model.Critic().cuda())
         self.models = (self.encoder, self.decoder, self.critic)
 
@@ -129,6 +131,12 @@ class Seq2SeqAgent(BaseAgent):
         sys.stdout.flush()
         self.logs = defaultdict(list)
         self.candidate = {}
+
+        self.wordEmbedding = load_vocabulary("r2r_src/MAF/data/glove/glove.6B.300d.txt")
+        self.net = MATnet(self.wordEmbedding).cuda()
+        init_net(self.net, "r2r_src/MAF/saved/model_0527_a20.pt")
+
+        #self.vocab_matrix = np.load('/egr/research-hlr/joslin/Matterdata/v1/scans/img_features/object_vocab.npy')
         #different spatial features
        
         self.motion_indicator_feature = self.get_motion_indicator_feature(args.train_motion_indi_path, args.val_seen_motion_indi_path, \
@@ -172,14 +180,20 @@ class Seq2SeqAgent(BaseAgent):
     def _feature_variable(self, obs):
         ''' Extract precomputed features into variable. '''
         features = np.empty((len(obs), args.views, self.feature_size + args.angle_feat_size), dtype=np.float32)
-        pano_obj_feat = np.empty((len(obs), args.views, 36, 300), dtype=np.float32)
+        pano_obj_img_feat = np.empty((len(obs), args.views, 36, 2048), dtype=np.float32)
+        pano_obj_text_feat = np.empty((len(obs), args.views, 36, 300), dtype=np.float32)
         pano_obj_mask = np.empty((len(obs), args.views, 36), dtype=np.float32)
+        pano_obj_text = []
         for i, ob in enumerate(obs):
-            features[i, :, :] = ob['feature']   # Image feat
-            pano_obj_feat[i,:,:,:] = self.vocab_embedding[ob['pano_obj_feat']]
+            features[i, :, :] = ob['feature'] 
+            pano_obj_img_feat[i,:,:,:] = ob['pano_obj_feat']
+            pano_obj_text_feat[i,:,:,:] = self.vocab_embedding[ob['pano_obj_feat_textid']]
             pano_obj_mask[i,:,:] = ob['pano_obj_mask']
+            pano_obj_text.append(ob['pano_obj_text'])
+
         return Variable(torch.from_numpy(features), requires_grad=False).cuda(), \
-            Variable(torch.from_numpy(pano_obj_feat), requires_grad=False)
+            Variable(torch.from_numpy(pano_obj_img_feat), requires_grad=False), Variable(torch.from_numpy(pano_obj_mask), requires_grad=False), pano_obj_text,\
+            Variable(torch.from_numpy(pano_obj_text_feat), requires_grad=False)
     
     
     def get_motion_indicator_feature(self, train_motion_indi_dir,val_seen_motion_indi_dir,val_unseen_motion_indi_dir, test_motion_indi_dir=None):
@@ -187,13 +201,10 @@ class Seq2SeqAgent(BaseAgent):
         motion_indicator_dict1 = np.load(train_motion_indi_dir, allow_pickle=True).item()
         motion_indicator_dict2 = np.load(val_seen_motion_indi_dir, allow_pickle=True).item()
         motion_indicator_dict3 = np.load(val_unseen_motion_indi_dir, allow_pickle=True).item()
-        #motion_indicator_dict4 = np.load(test_motion_indi_dir, allow_pickle=True).item()
 
         motion_indicator_dict.update(motion_indicator_dict1)
         motion_indicator_dict.update(motion_indicator_dict2)
         motion_indicator_dict.update(motion_indicator_dict3)
-        #motion_indicator_dict.update(motion_indicator_dict4)
-       
         return motion_indicator_dict
     
     def get_landmark_feature(self, train_landmark_dir, val_seen_landmark_dir, val_unseen_landmark_dir, test_landmark_dir=None):
@@ -201,13 +212,10 @@ class Seq2SeqAgent(BaseAgent):
         landmark_dict1 = np.load(train_landmark_dir, allow_pickle=True).item()
         landmark_dict2 = np.load(val_seen_landmark_dir, allow_pickle=True).item()
         landmark_dict3 = np.load(val_unseen_landmark_dir, allow_pickle=True).item()
-        #landmark_dict4 = np.load(test_landmark_dir, allow_pickle=True).item()
 
         landmark_dict.update(landmark_dict1)
         landmark_dict.update(landmark_dict2)
         landmark_dict.update(landmark_dict3)
-        #landmark_dict.update(landmark_dict4)
-        #landmark_dict.update(landmark_dict5)
 
         return landmark_dict
 
@@ -232,33 +240,40 @@ class Seq2SeqAgent(BaseAgent):
 
     def _candidate_variable1(self, obs):
         object_num = 36
-        feature_size1 = 300
+        feature_size1 = 2048
+        feature_size2 = 300
         object_rel = 6
 
         candidate_leng = [len(ob['candidate']) + 1 for ob in obs]       # +1 is for the end
         max_candidate_leng = max(candidate_leng)
-        candidate_obj_text_feat = np.zeros((len(obs), max_candidate_leng, object_num, feature_size1), dtype=np.float32)
+        candidate_obj_img_feat = np.zeros((len(obs), max_candidate_leng, object_num, feature_size1), dtype=np.float32)
+        candidate_obj_text_feat = np.zeros((len(obs), max_candidate_leng, object_num, feature_size2), dtype=np.float32)
 
         object_mask = np.zeros((len(obs), max_candidate_leng, object_num))
         candidate_feat = np.zeros((len(obs), max(candidate_leng), self.feature_size + args.angle_feat_size), dtype=np.float32)
         object_index = np.zeros((len(obs), max_candidate_leng),dtype=np.int64)
         object_relation = np.zeros((len(obs), max_candidate_leng, object_rel),dtype=np.float32)
+        object_text = []
         # Note: The candidate_feat at len(ob['candidate']) is the feature for the END
         # which is zero in my implementation
         for i, ob in enumerate(obs):
+            tmp_object_text = [['']*object_num]*max_candidate_leng
             for j, c in enumerate(ob['candidate']):
                 candidate_feat[i, j, :] = c['feature']        # Image feat
                 if isinstance(c['obj_feat'], tuple):
                     c['obj_feat'] = c['obj_feat'][0]
                 if isinstance(c['obj_mask'], tuple):
                     c['obj_mask'] = c['obj_mask'][0]
-                candidate_obj_text_feat[i,j,:] = self.vocab_embedding[c['obj_feat']]
+                candidate_obj_img_feat[i,j,:] = c['obj_feat']
+                candidate_obj_text_feat[i,j,:] = self.vocab_embedding[c['obj_feat_textid']]
                 object_mask[i,j] = c['obj_mask']
                 object_index[i,j] = c['pointId']
                 object_relation[i,j,:] = c['obj_rel']
+                tmp_object_text[j] = c['obj_text']
+            object_text.append(tmp_object_text)
        
-        return torch.from_numpy(candidate_feat).cuda(), candidate_leng, torch.from_numpy(candidate_obj_text_feat).cuda(), torch.from_numpy(object_mask).cuda(), torch.from_numpy(object_index).cuda(),\
-             torch.from_numpy(object_relation).cuda()
+        return torch.from_numpy(candidate_feat).cuda(), candidate_leng, torch.from_numpy(candidate_obj_img_feat).cuda(), torch.from_numpy(object_mask).cuda(), torch.from_numpy(object_index).cuda(),\
+             torch.from_numpy(object_relation).cuda(), object_text, torch.from_numpy(candidate_obj_text_feat).cuda()
 
 
     def distribute_feature(self, interval_len, pre_feature, feature, candidate_leng):
@@ -276,15 +291,16 @@ class Seq2SeqAgent(BaseAgent):
 
     def get_input_feat(self, obs):
         input_a_t = np.zeros((len(obs), args.angle_feat_size), np.float32)
-
+        
         for i, ob in enumerate(obs):
             input_a_t[i] = utils.angle_feature(ob['heading'], ob['elevation'])
         input_a_t = torch.from_numpy(input_a_t).cuda()
 
-        f_t, pano_obj_feat = self._feature_variable(obs)      # Image features from obs
-        candidate_feat, candidate_leng, candidate_obj_text_feat, object_mask, object_index, object_relation= self._candidate_variable1(obs)
+        f_t, pano_obj_feat, pano_obj_mask, pano_obj_text, pano_obj_text_feat = self._feature_variable(obs)      # Image features from obs
+        candidate_feat, candidate_leng, candidate_obj_img_feat, object_mask, object_index, object_relation, object_text, candidate_obj_text_feat= self._candidate_variable1(obs)
 
-        return input_a_t, f_t, candidate_feat, candidate_obj_text_feat, object_mask, candidate_leng, pano_obj_feat, object_index, object_relation
+        return input_a_t, f_t, candidate_feat, candidate_obj_img_feat, object_mask, candidate_leng, pano_obj_feat, object_index, object_relation, \
+            object_text, pano_obj_mask, pano_obj_text, pano_obj_text_feat, candidate_obj_text_feat
     
 
     def _teacher_action(self, obs, ended):
@@ -393,8 +409,6 @@ class Seq2SeqAgent(BaseAgent):
         instr_id_list = []
 
         for ob_id, each_ob in enumerate(perm_obs):
-            if each_ob['instr_id'] == "48_2":
-                print('yue')
             instr_id_list.append(each_ob['instr_id']) 
             config_num_list.append(len(each_ob['configurations']))
             sentence.append(each_ob['instructions'])
@@ -412,9 +426,10 @@ class Seq2SeqAgent(BaseAgent):
         motion_indicator_tensor = torch.zeros(batch_size, max_config_num, args.text_dimension).cuda()
         landmark_relation = torch.zeros(batch_size, max_config_num, max_landmark_num, 6).cuda()
         landmark_relation_mask = torch.zeros(batch_size, max_config_num, max_landmark_num).cuda()
-
+        landmark_text = []
 
         for ob_id, each_ob in enumerate(perm_obs):
+            tmp_landmark_text = []
             for config_id, each_config in enumerate(each_ob['configurations']):
                 tmp_landmark_tuple = self.landmark_feature[each_ob['instr_id']+"_"+str(config_id)][0]
                 if len(tmp_landmark_tuple)==1 and tmp_landmark_tuple[0][0] == '':
@@ -422,13 +437,13 @@ class Seq2SeqAgent(BaseAgent):
                 else:
                     tmp_landmark_mask = (len(tmp_landmark_tuple)*[1])
                 for landmark_id, each_landmark in enumerate(tmp_landmark_tuple):
-                    # if each_landmark[0] in scene_list:
-                    #     each_landmark[1] = np.zeros(300)
+                    if each_landmark[0]:
+                        tmp_landmark_text.append(each_landmark[0])
                     if sum(each_landmark[-1]) == 0:
                         landmark_relation_mask[ob_id,config_id,landmark_id] = 0
                     else:
                         landmark_relation_mask[ob_id,config_id,landmark_id] = 1
-
+                
                 
                 tmp_motion_indi_feat = torch.from_numpy(self.motion_indicator_feature[each_ob['instr_id']+"_"+str(config_id)][1])
                 tmp_landmark_tensor = torch.from_numpy(np.stack(list(zip(*tmp_landmark_tuple))[1], axis=0))
@@ -438,7 +453,7 @@ class Seq2SeqAgent(BaseAgent):
                 motion_indicator_tensor[ob_id, config_id,:] = tmp_motion_indi_feat
                 landmark_mask[ob_id,config_id,:len(tmp_landmark_tuple)] = torch.tensor(tmp_landmark_mask)
                 landmark_relation[ob_id, config_id,:len(tmp_landmark_tuple),:] = tmp_landmark_relation
-                     
+            landmark_text.append(tmp_landmark_text)   
        # ctx, h_t, c_t = self.encoder(sentence_list, seq_lengths)
         tmp_ctx, h_t, c_t, tmp_ctx_mask, split_index = self.encoder(sentence, seq_len=seq_lengths)
 
@@ -508,17 +523,16 @@ class Seq2SeqAgent(BaseAgent):
             #input_a_t, f_t, candidate_feat, candidate_leng = self.get_input_feat(perm_obs)
             #candidate_obj_text_feat = self.get_cand_object_feat(perm_obs)
 
-            input_a_t, f_t, candidate_feat, candidate_obj_text_feat, object_mask, candidate_leng, pano_obj_feat, object_index, object_relation = self.get_input_feat(perm_obs)
+            input_a_t, f_t, candidate_feat, candidate_obj_img_feat, candi_object_mask, candidate_leng, pano_obj_img_feat, object_index, \
+            object_relation, candi_object_text, pano_obj_mask, pano_object_text, pano_obj_text_feat, candidate_obj_text_feat = self.get_input_feat(perm_obs)
+            candidate_obj_img_feat = candidate_obj_img_feat.cuda()
+            pano_obj_img_feat = pano_obj_img_feat.cuda()
+            candi_object_mask = candi_object_mask.cuda()
+            pano_obj_mask = pano_obj_mask.cuda()
+            pano_obj_text_feat = pano_obj_text_feat.cuda()
             candidate_obj_text_feat = candidate_obj_text_feat.cuda()
-            pano_obj_feat = pano_obj_feat.cuda()
-            object_index = object_index.cuda()
             
-            #pano_obj_feat = pano_obj_feat[:,:,:top_N,:].cuda()
-            # candidat_relation = candidat_relation.cuda()
-            #view_img_feat = view_img_feat.cuda()
-            #candidat_relation = candidat_relation.cuda()
-            object_mask = object_mask.cuda()
-            
+        
             if speaker is not None:       # Apply the env drop mask to the feat
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
@@ -531,13 +545,36 @@ class Seq2SeqAgent(BaseAgent):
             new_candidate_leng = list(map(lambda x:x-1,candidate_leng))
             new_candidate_mask = utils.length2mask(new_candidate_leng, size=max(candidate_leng))
 
+            pano_landmark_text = []
+            new_pano_object_text = []
+            pano_image_num = 36
+            for each_landmark_list in landmark_text:
+                pano_landmark_text += [each_landmark_list]*36
+            for each_object_text in pano_object_text:
+                new_pano_object_text += each_object_text
+            pano_maf_landmark_repr, pano_maf_object_repr = MAF_representation(self.wordEmbedding, self.net, new_pano_object_text, pano_landmark_text, pano_obj_img_feat.view(batch_size*pano_image_num, 36, 2048), max_config_num*max_landmark_num)
+
+            candi_landmark_text = []
+            new_candi_object_text = []
+            candi_image_num = candidate_obj_img_feat.shape[1]
+            for each_landmark_list in landmark_text:
+                candi_landmark_text += [each_landmark_list]*candi_image_num
+            for each_object_text in candi_object_text:
+                new_candi_object_text += each_object_text
+            candi_maf_landmark_repr, candi_maf_object_repr = MAF_representation(self.wordEmbedding, self.net, new_candi_object_text, candi_landmark_text, candidate_obj_img_feat.view(batch_size*candi_image_num, 36, 2048), max_config_num*max_landmark_num)
+            
+            pano_maf_landmark_repr = pano_maf_landmark_repr.view(batch_size, pano_image_num, max_config_num, max_landmark_num, 300)
+            pano_maf_object_repr = pano_maf_object_repr.view(batch_size,pano_image_num, 36, 300)
+            candi_maf_landmark_repr = candi_maf_landmark_repr.view(batch_size, candi_image_num,max_config_num, max_landmark_num, 300)
+            candi_maf_object_repr = candi_maf_object_repr.view(batch_size,candi_image_num, 36, 300)
+            
             h_t, c_t, logit, h1, ctx_attn = self.decoder(input_a_t, f_t, candidate_feat,
                                                h_t, h1, c_t,
-                                               ctx, t, ctx_attn, r_t, ctx_mask, object_mask=object_mask, candidate_mask = new_candidate_mask, landmark_object_feature = landmark_object_feature, 
-                                               candidate_obj_text_feat = candidate_obj_text_feat ,landmark_mask=landmark_mask, landmark_relation=landmark_relation, landmark_relation_mask=landmark_relation_mask, candidate_relation=object_relation,
-                                               pano_obj_feat=pano_obj_feat, object_index =object_index,
+                                               ctx, t, ctx_attn, r_t, ctx_mask, candi_object_mask=candi_object_mask, candidate_mask = new_candidate_mask, candi_landmark = candi_maf_landmark_repr, 
+                                               candidate_img_feat = candi_maf_object_repr, candidate_text_feat = candidate_obj_text_feat, landmark_mask=landmark_mask, landmark_relation=landmark_relation, landmark_relation_mask=landmark_relation_mask, candidate_relation=object_relation,
+                                               pano_img_feat=pano_maf_object_repr, pano_text_feat=pano_obj_text_feat, pano_landmark = pano_maf_landmark_repr, pano_obj_mask=pano_obj_mask, object_index =object_index,
                                                already_dropfeat=(speaker is not None))
- 
+
        
 
             hidden_states.append(h_t)
@@ -629,17 +666,16 @@ class Seq2SeqAgent(BaseAgent):
             # Last action in A2C
             #
             # input_a_t, f_t, candidate_feat, candidate_leng = self.get_input_feat(perm_obs)
-            input_a_t, f_t, candidate_feat, candidate_obj_text_feat, object_mask, candidate_leng, pano_obj_feat, object_index, object_relation = self.get_input_feat(perm_obs)
+            input_a_t, f_t, candidate_feat, candidate_obj_img_feat, candi_object_mask, candidate_leng, pano_obj_img_feat, object_index, \
+            object_relation, candi_object_text, pano_obj_mask, pano_object_text, pano_obj_text_feat, candidate_obj_text_feat = self.get_input_feat(perm_obs)
+            candidate_obj_img_feat = candidate_obj_img_feat.cuda()
+            pano_obj_img_feat = pano_obj_img_feat.cuda()
+            candi_object_mask = candi_object_mask.cuda()
+            pano_obj_mask = pano_obj_mask.cuda()
+            pano_obj_text_feat = pano_obj_text_feat.cuda()
             candidate_obj_text_feat = candidate_obj_text_feat.cuda()
-            pano_obj_feat = pano_obj_feat.cuda()
-            object_index = object_index.cuda()
             
-            #pano_obj_feat = pano_obj_feat[:,:,:top_N,:].cuda()
-            # candidat_relation = candidat_relation.cuda()
-            #view_img_feat = view_img_feat.cuda()
-            #candidat_relation = candidat_relation.cuda()
-            object_mask = object_mask.cuda()
-            
+        
             if speaker is not None:       # Apply the env drop mask to the feat
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
@@ -652,11 +688,34 @@ class Seq2SeqAgent(BaseAgent):
             new_candidate_leng = list(map(lambda x:x-1,candidate_leng))
             new_candidate_mask = utils.length2mask(new_candidate_leng, size=max(candidate_leng))
 
+            pano_landmark_text = []
+            new_pano_object_text = []
+            pano_image_num = 36
+            for each_landmark_list in landmark_text:
+                pano_landmark_text += [each_landmark_list]*36
+            for each_object_text in pano_object_text:
+                new_pano_object_text += each_object_text
+            pano_maf_landmark_repr, pano_maf_object_repr = MAF_representation(self.wordEmbedding, self.net, new_pano_object_text, pano_landmark_text, pano_obj_img_feat.view(batch_size*pano_image_num, 36, 2048), max_config_num*max_landmark_num)
+
+            candi_landmark_text = []
+            new_candi_object_text = []
+            candi_image_num = candidate_obj_img_feat.shape[1]
+            for each_landmark_list in landmark_text:
+                candi_landmark_text += [each_landmark_list]*candi_image_num
+            for each_object_text in candi_object_text:
+                new_candi_object_text += each_object_text
+            candi_maf_landmark_repr, candi_maf_object_repr = MAF_representation(self.wordEmbedding, self.net, new_candi_object_text, candi_landmark_text, candidate_obj_img_feat.view(batch_size*candi_image_num, 36, 2048), max_config_num*max_landmark_num)
+            
+            pano_maf_landmark_repr = pano_maf_landmark_repr.view(batch_size, pano_image_num, max_config_num, max_landmark_num, 300)
+            pano_maf_object_repr = pano_maf_object_repr.view(batch_size,pano_image_num, 36, 300)
+            candi_maf_landmark_repr = candi_maf_landmark_repr.view(batch_size, candi_image_num,max_config_num, max_landmark_num, 300)
+            candi_maf_object_repr = candi_maf_object_repr.view(batch_size,candi_image_num, 36, 300)
+            
             last_h_, _, _, _, _ = self.decoder(input_a_t, f_t, candidate_feat,
                                                h_t, h1, c_t,
-                                               ctx, t, ctx_attn, r_t, ctx_mask, object_mask=object_mask, candidate_mask = new_candidate_mask, landmark_object_feature = landmark_object_feature, 
-                                               candidate_obj_text_feat = candidate_obj_text_feat ,landmark_mask=landmark_mask, landmark_relation=landmark_relation, landmark_relation_mask=landmark_relation_mask, candidate_relation=object_relation,
-                                               pano_obj_feat=pano_obj_feat, object_index =object_index,
+                                               ctx, t, ctx_attn, r_t, ctx_mask, candi_object_mask=candi_object_mask, candidate_mask = new_candidate_mask, candi_landmark = candi_maf_landmark_repr, 
+                                               candidate_img_feat = candi_maf_object_repr, candidate_text_feat = candidate_obj_text_feat, landmark_mask=landmark_mask, landmark_relation=landmark_relation, landmark_relation_mask=landmark_relation_mask, candidate_relation=object_relation,
+                                               pano_img_feat=pano_maf_object_repr, pano_text_feat=pano_obj_text_feat, pano_landmark = pano_maf_landmark_repr, pano_obj_mask=pano_obj_mask, object_index =object_index,
                                                already_dropfeat=(speaker is not None))
 
             rl_loss = 0.

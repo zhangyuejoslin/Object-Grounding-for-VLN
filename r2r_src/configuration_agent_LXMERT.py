@@ -112,9 +112,9 @@ class Seq2SeqAgent(BaseAgent):
         'num_layers': args.rnn_num_layers
     }
         self.encoder = encoder.EncoderBERT(**encoder_kwargs).cuda()
-        self.decoder =  nn.DataParallel(model.ConfigurationLXMERTDecoder(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda())
-        self.lxmert_model =  nn.DataParallel(LxmertModel.from_pretrained('unc-nlp/lxmert-base-uncased', cache_dir='/VL/space/zhan1624/lxmert-base-uncased').cuda())
-        self.critic =  nn.DataParallel(model.Critic().cuda())
+        self.decoder =  model.ConfigurationLXMERTDecoder(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda()
+        #self.lxmert_model =  nn.DataParallel(LxmertModel.from_pretrained('unc-nlp/lxmert-base-uncased', cache_dir='/VL/space/zhan1624/lxmert-base-uncased').cuda())
+        self.critic =  model.Critic().cuda()
         self.models = (self.encoder, self.decoder, self.critic)
 
         # Optimizers

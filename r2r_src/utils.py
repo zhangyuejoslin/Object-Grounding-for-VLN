@@ -19,7 +19,9 @@ import networkx as nx
 from param import args
 import en_core_web_lg
 import pickle
-import bcolz
+
+from MAF.utils.wordembeddings import WordEmbeddings
+from MAF.utils.wordindexer import WordIndexer
 
 nlp = en_core_web_lg.load()
 
@@ -33,10 +35,11 @@ padding_idx = base_vocab.index('<PAD>')
 #     'position_file': 'tasks/R2R-pano/data/data/spatial_position_dic.txt'
 # }
 config = {
-    'split_file' : '/VL/space/zhan1624/R2R-EnvDrop/tasks/R2R/dictionaries/split_dictionary.txt',
-    'motion_indicator_file' : '/VL/space/zhan1624/R2R-EnvDrop/tasks/R2R/dictionaries/motion_dict.txt',
-    'stop_words_file': '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/stop_words.txt',
-    'position_file': '/VL/space/zhan1624/selfmonitoring-agent/tasks/R2R-pano/data/data/spatial_position_dic.txt'
+    'split_file' : '/home/joslin/R2R-EnvDrop/tasks/R2R/dictionaries/split_dictionary.txt',
+    'motion_indicator_file' : '/home/joslin/R2R-EnvDrop/tasks/R2R/dictionaries/motion_dict.txt',
+    'stop_words_file': '/home/joslin/R2R-EnvDrop/tasks/R2R/dictionaries/stop_words.txt',
+    'position_file': '/home/joslin/R2R-EnvDrop/tasks/R2R/dictionaries/spatial_position_dic.txt',
+    'scene_file': '/home/joslin/R2R-EnvDrop/tasks/R2R/dictionaries/scene_words.txt'
 }
 def split_oder(dictionary):
     return sorted(dictionary, key = lambda x: len(x.split()), reverse=True)
@@ -57,6 +60,12 @@ with open(config['motion_indicator_file']) as f_dict:
     motion_dict = f_dict.read().split('\n')
     motion_dict = [each_motion.strip() for each_motion in motion_dict]
     motion_dict = split_oder(motion_dict)
+
+with open(config['scene_file']) as f_scene:
+    scene_words = f_scene.read().split('\n')
+    scene_words = [each_scene.strip() for each_scene in scene_words]
+    scene_words = sorted(scene_words, key = lambda x: len(x), reverse=True)
+
 
 def load_nav_graphs(scans):
     ''' Load connectivity graph for each scan '''
@@ -97,6 +106,7 @@ def load_datasets(splits):
     old_state = random.getstate()
     for split in splits:
         # It only needs some part of the dataset?x
+        
         components = split.split("@")
         number = -1
         if len(components) > 1:
@@ -106,7 +116,7 @@ def load_datasets(splits):
         # if split in ['train', 'val_seen', 'val_unseen', 'test',
         #              'val_unseen_half1', 'val_unseen_half2', 'val_seen_half1', 'val_seen_half2']:       # Add two halves for sanity check
         if "/" not in split:
-            with open('tasks/R2R/data/R2R_%s.json' % split) as f:
+            with open('tasks/R2R/data/R2R_%s3.json' % split) as f:
                 new_data = json.load(f)
         else:
             with open(split) as f:
@@ -261,8 +271,9 @@ def get_motion_indicator(test_sentence):
 #         landmark_list=[("", np.zeros(300))]
 #     return [landmark_list, landmark_flag]
 
+# 
 def get_landmark(each_configuration, whether_root=False):
-    landmark_stopwords = ['right', 'left','front','them', 'you','end','top', 'bottom','it','middle','side', 'a left', 'a right', 'steps', 'step', 'exit', "each", 'other', "far", 'your', 'area']
+    landmark_stopwords = ['right', 'left','front','them', 'you','end','top', 'bottom','it','middle','side', 'a left', 'a right', 'level', 'exit', "each", 'other', "far", 'your', 'area', 'flight']
     definite_article = ['a', 'an', 'the']
     area_stopwords = ['area','areas']
 
@@ -272,7 +283,7 @@ def get_landmark(each_configuration, whether_root=False):
     landmark_flag = 1
     if each_configuration in motion_dict:
         landmark_flag = 0
-        landmark_list=[("", np.zeros(300))]
+        landmark_list=[["", np.zeros(300),-100, [0,0,0,0,0,0]]]
         return [landmark_list, landmark_flag]
 
     for chunk in doc.noun_chunks:
@@ -293,7 +304,7 @@ def get_landmark(each_configuration, whether_root=False):
                         continue
                 else:
                     landmark_vector = landmark_text.vector
-                    landmark_list.append((landmark_text.text, landmark_vector))
+                    landmark_list.append([landmark_text.text, landmark_vector, landmark_text.idx, [0,0,0,0,0,0]])
                     landmark_text_list.append(landmark_text)
 
         else:
@@ -304,7 +315,7 @@ def get_landmark(each_configuration, whether_root=False):
                           
     if not landmark_list:
         landmark_flag = 0
-        landmark_list=[("", np.zeros(300))]
+        landmark_list=[["", np.zeros(300),-100, [0,0,0,0,0,0]]]
     return [landmark_list, landmark_flag]
 
 def get_glove_matrix(index_to_word, vector_dim):
@@ -697,6 +708,13 @@ def length2mask(length, size=None):
                 > (torch.LongTensor(length) - 1).unsqueeze(1)).cuda()
     return mask
 
+def length2mask(length, size=None):
+    batch_size = len(length)
+    size = int(max(length)) if size is None else size
+    mask = (torch.arange(size, dtype=torch.int64).unsqueeze(0).repeat(batch_size, 1)
+                > (torch.LongTensor(length) - 1).unsqueeze(1)).cuda()
+    return mask
+
 def average_length(path2inst):
     length = []
 
@@ -767,3 +785,35 @@ class FloydGraph:
             #     for x2 in (x, k, y):
             #         print(x1, x2, "%.4f" % self._dis[x1][x2])
             return self.path(x, k) + self.path(k, y)
+
+
+def load_vocabulary(embeddings_file: str) -> WordEmbeddings:
+	f = open(embeddings_file)
+	word_indexer = WordIndexer()
+	vectors = []
+
+	word_indexer.add_and_get_index("PAD")
+	word_indexer.add_and_get_index("UNK")
+
+	for line in f:
+		if line.strip() != "":
+			space_idx = line.find(' ')
+			word = line[:space_idx]
+			numbers = line[space_idx + 1:]
+			float_numbers = [float(number_str) for number_str in numbers.split()]
+			vector = np.array(float_numbers)
+			word_indexer.add_and_get_index(word)
+
+			if len(vectors) == 0:
+				vectors.append(np.zeros(vector.shape[0]))
+				vectors.append(np.zeros(vector.shape[0]))
+			vectors.append(vector)
+	f.close()
+	print("Read in " + repr(len(word_indexer)) + " vectors of size " + repr(vectors[0].shape[0]))
+	return WordEmbeddings(word_indexer, np.array(vectors))
+
+def glove_embedding(embedding_file):
+    wordEmbedding = load_vocabulary(embedding_file)
+    glove_indexer = wordEmbedding.word_indexer
+    glove_vector = wordEmbedding.vectors
+    return glove_indexer, glove_vector

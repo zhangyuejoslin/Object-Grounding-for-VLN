@@ -140,7 +140,7 @@ class Seq2SeqAgent(BaseAgent):
                                             args.val_unseen_motion_indi_path, args.motion_indicator_aug)
         self.landmark_feature = self.get_landmark_feature(args.train_landmark_path, args.val_seen_landmark_path, \
                                                         args.val_unseen_landmark_path, args.landmark_aug)
-        self.landmark_triplet_vector = self.get_landmark_triplets(args.train_landmark_triplet, args.val_seen_landmark_triplet, args.val_unseen_landmark_triplet)
+        #self.landmark_triplet_vector = self.get_landmark_triplets(args.train_landmark_triplet, args.val_seen_landmark_triplet, args.val_unseen_landmark_triplet)
 
     def softmax(self, x):
         s = torch.exp(x)
@@ -494,6 +494,8 @@ class Seq2SeqAgent(BaseAgent):
         instr_id_list = []
 
         for ob_id, each_ob in enumerate(perm_obs):
+            if each_ob['instr_id'] == "6757_2":
+                print('yue')
             instr_id_list.append(each_ob['instr_id']) 
             config_num_list.append(len(each_ob['configurations']))
             sentence.append(each_ob['instructions'])
@@ -554,8 +556,10 @@ class Seq2SeqAgent(BaseAgent):
         #ctx = bert_ctx
         atten_ctx2, attn = self.encoder.sf(motion_indicator_tensor, bert_cls_mask, bert_ctx, bert_ctx_mask)
         atten_ctx3, attn = self.encoder.sf(torch.mean(landmark_object_feature, dim=2), bert_cls_mask, bert_ctx, bert_ctx_mask)
-        #ctx = torch.cat([attend_ctx, torch.mean(landmark_object_feature, dim=2), motion_indicator_tensor], dim=2)   
+        
         ctx = torch.mean(torch.stack([atten_ctx1, atten_ctx2, atten_ctx3],dim=2), dim=2)
+        #ctx = torch.mean(torch.stack([atten_ctx1, atten_ctx3],dim=2), dim=2)
+     
         ctx_mask = (bert_cls_mask==0).byte()
 
         # Init the reward shaping
@@ -1189,6 +1193,7 @@ class Seq2SeqAgent(BaseAgent):
         ''' Loads parameters (but not training state) '''
         states = torch.load(path)
         def recover_state(name, model, optimizer):
+         
             state = model.state_dict()
             model_keys = set(state.keys())
             load_keys = set(states[name]['state_dict'].keys())
@@ -1198,9 +1203,15 @@ class Seq2SeqAgent(BaseAgent):
             model.load_state_dict(state)
             if args.loadOptim:
                 optimizer.load_state_dict(states[name]['optimizer'])
+            with open(f"{name}.txt", "w") as f1:
+                for key, value in state.items():
+                    f1.write(key)
+                    f1.write('\n')
+                    f1.write(str(np.array(value.detach().cpu())))
+
         all_tuple = [("encoder", self.encoder, self.encoder_optimizer),
                      ("decoder", self.decoder, self.decoder_optimizer),
                      ("critic", self.critic, self.critic_optimizer)]
-        for param in all_tuple:
+        for param in all_tuple:      
             recover_state(*param)
         return states['encoder']['epoch'] - 1

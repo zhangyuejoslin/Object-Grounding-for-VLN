@@ -16,6 +16,7 @@ from env import R2RBatch
 from utils import padding_idx, add_idx, Tokenizer
 import utils
 import model
+import encoder
 import param
 from param import args
 from collections import defaultdict
@@ -94,9 +95,19 @@ class Seq2SeqAgent(BaseAgent):
         self.feature_size = self.env.feature_size
 
         # Models
+        encoder_kwargs = {
+        'vocab_size': tok.vocab_size(),
+        'embedding_size': args.word_embedding_size,
+        'hidden_size': args.rnn_hidden_size,
+        'padding_idx': padding_idx,
+        'dropout_ratio': args.rnn_dropout,
+        'bidirectional': args.bidirectional == 1,
+        'num_layers': args.rnn_num_layers
+    }
         enc_hidden_size = args.rnn_dim//2 if args.bidir else args.rnn_dim
-        self.encoder = model.EncoderLSTM(tok.vocab_size(), args.wemb, enc_hidden_size, padding_idx,
-                                         args.dropout, bidirectional=args.bidir).cuda()
+        self.encoder = encoder.EncoderBERT(**encoder_kwargs).cuda()
+        #self.encoder = model.EncoderLSTM(tok.vocab_size(), args.wemb, enc_hidden_size, padding_idx,
+                                         #args.dropout, bidirectional=args.bidir).cuda()
         self.decoder = model.AttnDecoderLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda()
         self.critic = model.Critic().cuda()
         self.models = (self.encoder, self.decoder, self.critic)
@@ -260,10 +271,17 @@ class Seq2SeqAgent(BaseAgent):
             obs = np.array(self.env.reset(batch))
 
         # Reorder the language input for the encoder (do not ruin the original code)
+
+        
         seq, seq_mask, seq_lengths, perm_idx = self._sort_batch(obs)
         perm_obs = obs[perm_idx]
+        sentence = []
+        for ob_id, each_ob in enumerate(perm_obs):
+            sentence.append(each_ob['instructions'])
 
-        ctx, h_t, c_t = self.encoder(seq, seq_lengths)
+        ctx, h_t, c_t, ctx_mask = self.encoder(sentence, seq_len=seq_lengths)
+
+        #ctx, h_t, c_t = self.encoder(seq, seq_lengths)
         ctx_mask = seq_mask
 
         # Init the reward shaping

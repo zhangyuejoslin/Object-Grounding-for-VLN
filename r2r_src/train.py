@@ -9,37 +9,42 @@ from speaker import Speaker
 
 from utils import read_vocab,write_vocab,build_vocab,Tokenizer,padding_idx,timeSince, read_img_features
 import utils
-from env import R2RBatch
+from env_vision import R2RBatch
 #from configuration_agent import Seq2SeqAgent
-from configuration_agent2 import Seq2SeqAgent 
-#from configuration_agent_LXMERT import Seq2SeqAgent
+#from configuration_agent3 import Seq2SeqAgent 
+#from speaker_config_agent import Seq2SeqAgent 
+from configuration_agent_LXMERT import Seq2SeqAgent
 #from agent import Seq2SeqAgent
 #from configuration_relation_agent import Seq2SeqAgent
 from eval import Evaluation
 from param import args
-
+import os
 import warnings
 warnings.filterwarnings("ignore")
 
 
 from tensorboardX import SummaryWriter
 
-
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
+os.environ["NCCL_DEBUG"] = "INFO"
 log_dir = 'snap/%s' % args.name
-checkpoint_dir = '/egr/research-hlr/joslin/Matterdata/v1/scans/checkpoints'
+checkpoint_dir = '/home/hlr/shared/data/joslin/checkpoints'
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
 TRAIN_VOCAB = 'tasks/R2R/data/train_vocab.txt'
 TRAINVAL_VOCAB = 'tasks/R2R/data/trainval_vocab.txt'
 
-IMAGENET_FEATURES = '/egr/research-hlr/joslin/Matterdata/v1/scans/img_features/ResNet-152-imagenet.tsv'
-PLACE365_FEATURES = 'img_features/ResNet-152-places365.tsv'
+IMAGENET_FEATURES = 'img_features/ResNet-152-imagenet.tsv'
+#PLACE365_FEATURES = 'img_features/ResNet-152-places365.tsv'
 
-result_path = "/VL/space/zhan1624/R2R-EnvDrop/result/agent/"
+PLACE365_FEATURES = '/home/hlr/shared/data/joslin/img_features/ResNet-152-places365.tsv'
+
+result_path = "/home/joslin/R2R-EnvDrop/result/agent/"
 
 if args.features == 'imagenet':
     features = IMAGENET_FEATURES
+    #features = PLACE365_FEATURES
 
 if args.fast_train:
     name, ext = os.path.splitext(features)
@@ -201,7 +206,7 @@ def train(train_env, tok, n_iters, log_every=200, val_envs={}, aug_env=None):
                             best_val[env_name]['update'] = True
                 loss_str += ', %s: %.3f' % (metric, val)
         
-        #np.save('candidate.npy', listner.candidate)
+        
         for env_name in best_val:
             if best_val[env_name]['update']:
                 best_val[env_name]['state'] = 'Iter %d %s' % (iter, loss_str)
@@ -223,7 +228,7 @@ def train(train_env, tok, n_iters, log_every=200, val_envs={}, aug_env=None):
         if iter % 50000 == 0:
             listner.save(idx, os.path.join(checkpoint_dir, args.name, "state_dict/%s" % str(experiment_time), "Iter_%06d" % (iter)))
 
-    listner.save(idx, os.path.join(checkpoint_dir, args.name, "state_dict/%s" % str(experiment_time), "LAST_iter%d" % (idx)))
+    #listner.save(idx, os.path.join(checkpoint_dir, args.name, "state_dict/%s" % str(experiment_time), "LAST_iter%d" % (idx)))
 
 
 def valid(train_env, tok, val_envs={}):
@@ -378,17 +383,20 @@ def train_val():
 
     featurized_scans = set([key.split("_")[0] for key in list(feat_dict.keys())])
     
-    if not args.test_obj:
-        print('Loading compact pano-caffe object features ... (~3 seconds)')
-        import pickle as pkl
-        with open('/egr/research-hlr/joslin/Matterdata/v1/scans/img_features/pano_object_class.pkl', 'rb') as f_pc:
-            pano_caffe = pkl.load(f_pc)
+    if args.using_obj:
+        start_time = time.time()
+        #pano_caffe = np.load(args.obj_img_feat_path1, allow_pickle=True).item()
+        pano_caffe = None
+        #pano_caffe_text = None
+        pano_caffe_text = np.load(args.obj_text_feat_path2, allow_pickle=True).item()
+        end_time = time.time()
+        print(f"using {end_time-start_time} to load the object image feature")
+
     else:
         pano_caffe = None
 
-    train_env = R2RBatch(feat_dict, pano_caffe, batch_size=args.batchSize, splits=['train'], tokenizer=tok)
+    train_env = R2RBatch(feat_dict, pano_caffe, pano_caffe_text, batch_size=args.batchSize, splits=['train'], tokenizer=tok)
     from collections import OrderedDict
-
     val_env_names = ['val_unseen', 'val_seen']
     if args.submit:
         val_env_names.append('test')
@@ -398,20 +406,19 @@ def train_val():
         #val_env_names.append('train')
  
 
-    if not args.beam:
-        val_env_names.append("train") 
+    # if not args.beam:
+    #     val_env_names.append("train") 
 
     val_envs = OrderedDict(
         ((split,
-          (R2RBatch(feat_dict, pano_caffe, batch_size=args.batchSize, splits=[split], tokenizer=tok),
+          (R2RBatch(feat_dict, pano_caffe, pano_caffe_text, batch_size=args.batchSize, splits=[split], tokenizer=tok),
            Evaluation([split], featurized_scans, tok))
           )
          for split in val_env_names
          )
     )
     
-    # import sys
-    # sys.exit()
+
     if args.train == 'listener':
         train(train_env, tok, args.iters, val_envs=val_envs)
     elif args.train == 'validlistener':
@@ -466,18 +473,25 @@ def train_val_augment():
     feat_dict = read_img_features(features)
     featurized_scans = set([key.split("_")[0] for key in list(feat_dict.keys())])
 
+    if args.using_obj:
+        start_time = time.time()
+        pano_caffe = np.load(args.obj_img_feat_path, allow_pickle=True).item()
+        end_time = time.time()
+        print(f"using {end_time-start_time} to load the object image feature")
+    else:
+        pano_caffe = None
+
     # Load the augmentation data
     aug_path = args.aug
 
     # Create the training environment
-    aug_env = R2RBatch(feat_dict, batch_size=args.batchSize,
+    aug_env = R2RBatch(feat_dict, pano_caffe, batch_size=args.batchSize,
                          splits=[aug_path], tokenizer=tok, name='aug')
     
-    # import sys
-    # sys.exit()
-    train_env = R2RBatch(feat_dict, batch_size=args.batchSize,
+   
+    train_env = R2RBatch(feat_dict, pano_caffe, batch_size=args.batchSize,
                          splits=['train'], tokenizer=tok)
-
+   
     
  
 
@@ -492,7 +506,7 @@ def train_val_augment():
     print("The average action length of the dataset is %0.4f." % (stats['path']))
 
     # Setup the validation data
-    val_envs = {split: (R2RBatch(feat_dict, batch_size=args.batchSize, splits=[split],
+    val_envs = {split: (R2RBatch(feat_dict, pano_caffe, batch_size=args.batchSize, splits=[split],
                                  tokenizer=tok), Evaluation([split], featurized_scans, tok))
                 for split in ['train', 'val_seen', 'val_unseen']
                 }

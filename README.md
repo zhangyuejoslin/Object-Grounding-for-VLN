@@ -1,5 +1,3 @@
-% # Code and Data for Paper "Learning to Navigate Unseen Environments: Back Translation with Environmental Dropout" 
-
 ## Environment Installation
 Please refer to https://github.com/airsplay/R2R-EnvDrop to install the Matterport3D simulators, download Room-toroom dataset and install the python enviornments.
 

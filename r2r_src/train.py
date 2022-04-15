@@ -10,11 +10,7 @@ from speaker import Speaker
 from utils import read_vocab,write_vocab,build_vocab,Tokenizer,padding_idx,timeSince, read_img_features
 import utils
 from env import R2RBatch
-#from configuration_agent import Seq2SeqAgent
-from configuration_agent2 import Seq2SeqAgent 
-#from configuration_agent_LXMERT import Seq2SeqAgent
-#from agent import Seq2SeqAgent
-#from configuration_relation_agent import Seq2SeqAgent
+from relation_agent import Seq2SeqAgent
 from eval import Evaluation
 from param import args
 
@@ -25,6 +21,9 @@ warnings.filterwarnings("ignore")
 from tensorboardX import SummaryWriter
 
 
+os.environ['CUDA_VISIBLE_DEVICES'] = "3"
+os.environ["NCCL_DEBUG"] = "INFO"
+
 log_dir = 'snap/%s' % args.name
 checkpoint_dir = '/egr/research-hlr/joslin/Matterdata/v1/scans/checkpoints'
 if not os.path.exists(log_dir):
@@ -33,10 +32,10 @@ if not os.path.exists(log_dir):
 TRAIN_VOCAB = 'tasks/R2R/data/train_vocab.txt'
 TRAINVAL_VOCAB = 'tasks/R2R/data/trainval_vocab.txt'
 
-IMAGENET_FEATURES = '/egr/research-hlr/joslin/Matterdata/v1/scans/img_features/ResNet-152-imagenet.tsv'
+IMAGENET_FEATURES = '/egr/research-hlr/joslin/img_features/ResNet-152-imagenet.tsv'
 PLACE365_FEATURES = 'img_features/ResNet-152-places365.tsv'
 
-result_path = "/VL/space/zhan1624/R2R-EnvDrop/result/agent/"
+result_path = "/VL/space/zhan1624/obj-vln/result/agent/"
 
 if args.features == 'imagenet':
     features = IMAGENET_FEATURES
@@ -378,11 +377,10 @@ def train_val():
 
     featurized_scans = set([key.split("_")[0] for key in list(feat_dict.keys())])
     
-    if not args.test_obj:
-        print('Loading compact pano-caffe object features ... (~3 seconds)')
-        import pickle as pkl
-        with open('/egr/research-hlr/joslin/Matterdata/v1/scans/img_features/pano_object_class.pkl', 'rb') as f_pc:
-            pano_caffe = pkl.load(f_pc)
+    if args.using_obj:
+        pano_caffe = np.load(args.obj_text_feat_path, allow_pickle=True).item()
+        print("Finish Loading the object feature in %0.4f seconds" % (time.time() - start))
+
     else:
         pano_caffe = None
 
@@ -390,6 +388,8 @@ def train_val():
     from collections import OrderedDict
 
     val_env_names = ['val_unseen', 'val_seen']
+
+    
     if args.submit:
         val_env_names.append('test')
     else:
@@ -397,10 +397,10 @@ def train_val():
         # if you want to test "train", just uncomment this
         #val_env_names.append('train')
  
-
-    if not args.beam:
-        val_env_names.append("train") 
-
+   
+    # if not args.beam:
+    #     val_env_names.append("train") 
+ 
     val_envs = OrderedDict(
         ((split,
           (R2RBatch(feat_dict, pano_caffe, batch_size=args.batchSize, splits=[split], tokenizer=tok),
@@ -473,8 +473,7 @@ def train_val_augment():
     aug_env = R2RBatch(feat_dict, batch_size=args.batchSize,
                          splits=[aug_path], tokenizer=tok, name='aug')
     
-    # import sys
-    # sys.exit()
+
     train_env = R2RBatch(feat_dict, batch_size=args.batchSize,
                          splits=['train'], tokenizer=tok)
 
